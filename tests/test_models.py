@@ -3407,3 +3407,187 @@ def test_startup_prune_flag_prevents_repeat_calls(pipe_instance) -> None:
     pipe._stale_filter_ids_pruned = True
     # After flag is set, pipes() should not call prune again
     # (verified implicitly — if it did, it would fail without mocks)
+
+
+def test_register_video_models_uses_atomic_assignment_for_all_state_attrs():
+    """`register_video_models` must rebuild `_specs`/`_id_map`/`_models` and assign
+    each as a NEW object (not in-place mutation), and `ModelFamily._DYNAMIC_SPECS`
+    must be the same object as `cls._specs` post-call so feature lookups are
+    consistent with the spec dict."""
+    import json
+    from pathlib import Path
+    from open_webui_openrouter_pipe.models.registry import OpenRouterModelRegistry, ModelFamily
+
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "video_models_catalog.json").read_text())
+    video_model = fixture["data"][0]
+
+    OpenRouterModelRegistry._specs = {"chat-model-norm": {"features": frozenset(), "capabilities": {}}}
+    OpenRouterModelRegistry._id_map = {"chat-model-norm": "openai/some-chat"}
+    OpenRouterModelRegistry._models = [{"norm_id": "chat-model-norm", "id": "openai-some-chat", "name": "x"}]
+
+    pre_specs_id = id(OpenRouterModelRegistry._specs)
+    pre_id_map_id = id(OpenRouterModelRegistry._id_map)
+    pre_models_id = id(OpenRouterModelRegistry._models)
+
+    OpenRouterModelRegistry.register_video_models([video_model])
+
+    post_specs_id = id(OpenRouterModelRegistry._specs)
+    post_id_map_id = id(OpenRouterModelRegistry._id_map)
+    post_models_id = id(OpenRouterModelRegistry._models)
+
+    assert pre_specs_id != post_specs_id, "_specs must be atomically replaced (new dict)"
+    assert pre_id_map_id != post_id_map_id, "_id_map must be atomically replaced (new dict)"
+    assert pre_models_id != post_models_id, "_models must be atomically replaced (new list)"
+    assert ModelFamily._DYNAMIC_SPECS is OpenRouterModelRegistry._specs, (
+        "ModelFamily._DYNAMIC_SPECS must reference the same dict as _specs after register_video_models "
+        "(set_dynamic_specs called with the post-merge dict)"
+    )
+    assert "chat-model-norm" in OpenRouterModelRegistry._specs, "chat model must be preserved across video registration"
+
+
+@pytest.mark.asyncio
+async def test_chat_refresh_preserves_video_models():
+    """Chat catalog `_refresh` must NOT wipe video models from `_specs`/`_id_map`/`_models`.
+    Today's pipe.py runs ensure_loaded then ensure_video_catalog_loaded; the TTL gate
+    on the latter means video re-registration is skipped after the first hour. If
+    `_refresh` doesn't preserve video entries across the chat dict-replacement,
+    video models silently disappear from the dropdown until the video TTL expires."""
+    import json
+    import logging
+    from pathlib import Path
+    import aiohttp
+    from open_webui_openrouter_pipe import EncryptedStr, Pipe
+    from open_webui_openrouter_pipe.models.registry import (
+        ModelFamily,
+        OpenRouterModelRegistry,
+        sanitize_model_id,
+    )
+
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "video_models_catalog.json").read_text()
+    )
+    video_model = fixture["data"][0]
+    video_norm_id = ModelFamily.base_model(
+        sanitize_model_id(video_model["id"])
+    )
+
+    OpenRouterModelRegistry.register_video_models([video_model])
+    assert video_norm_id in OpenRouterModelRegistry._specs
+
+    pipe = Pipe()
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+
+        with aioresponses() as mock_http:
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload={"data": [{"id": "openai/gpt-4o", "name": "GPT-4o"}]},
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/endpoints/zdr",
+                payload={"data": []},
+                repeat=True,
+            )
+
+            async with aiohttp.ClientSession() as session:
+                await OpenRouterModelRegistry.ensure_loaded(
+                    session,
+                    base_url=pipe.valves.BASE_URL,
+                    api_key="test-api-key",
+                    cache_seconds=3600,
+                    logger=logging.getLogger("test"),
+                )
+
+        assert video_norm_id in OpenRouterModelRegistry._specs, (
+            "Chat refresh wiped video model from _specs"
+        )
+        assert video_norm_id in OpenRouterModelRegistry._id_map, (
+            "Chat refresh wiped video model from _id_map"
+        )
+        assert any(
+            m.get("norm_id") == video_norm_id for m in OpenRouterModelRegistry._models
+        ), "Chat refresh wiped video model from _models"
+        assert ModelFamily.supports("video_generation", video_norm_id), (
+            "ModelFamily lost video_generation feature for preserved video model "
+            "(set_dynamic_specs may have been called with pre-merge specs)"
+        )
+    finally:
+        await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_refresh_chat_wins_on_norm_id_collision_with_video():
+    """If a chat model's norm_id ever collides with a registered video norm_id, the
+    chat refresh must keep the chat spec (the catalog's authoritative answer)."""
+    import json
+    import logging
+    from pathlib import Path
+    import aiohttp
+    from open_webui_openrouter_pipe import EncryptedStr, Pipe
+    from open_webui_openrouter_pipe.models.registry import (
+        ModelFamily,
+        OpenRouterModelRegistry,
+        sanitize_model_id,
+    )
+
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "video_models_catalog.json").read_text()
+    )
+    video_model = fixture["data"][0]
+    video_id = video_model["id"]
+    video_norm_id = ModelFamily.base_model(sanitize_model_id(video_id))
+
+    OpenRouterModelRegistry.register_video_models([video_model])
+
+    pipe = Pipe()
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+
+        with aioresponses() as mock_http:
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload={"data": [{"id": video_id, "name": "ChatModelMasqueradingAsVideo"}]},
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/endpoints/zdr",
+                payload={"data": []},
+                repeat=True,
+            )
+
+            async with aiohttp.ClientSession() as session:
+                await OpenRouterModelRegistry.ensure_loaded(
+                    session,
+                    base_url=pipe.valves.BASE_URL,
+                    api_key="test-api-key",
+                    cache_seconds=3600,
+                    logger=logging.getLogger("test"),
+                )
+
+        spec = OpenRouterModelRegistry._specs.get(video_norm_id) or {}
+        features = set(spec.get("features") or set())
+        assert "video_generation" not in features, (
+            "Chat-wins-on-collision violated: chat refresh preserved the video spec "
+            "instead of the new chat-side entry."
+        )
+    finally:
+        await pipe.close()
+
+
+def test_catalog_manager_uses_direct_attr_for_last_fetch(pipe_instance):
+    """catalog_manager.maybe_schedule_model_metadata_sync reads _last_fetch via
+    direct attr access (not getattr-with-default), so any future rename fails loudly."""
+    import inspect
+    from open_webui_openrouter_pipe.models import catalog_manager
+
+    source = inspect.getsource(catalog_manager.ModelCatalogManager.maybe_schedule_model_metadata_sync)
+    assert 'getattr(OpenRouterModelRegistry, "_last_fetch"' not in source, (
+        "catalog_manager must NOT use getattr-with-default for _last_fetch; "
+        "use direct attribute access so renames fail loudly."
+    )
+    assert "OpenRouterModelRegistry._last_fetch" in source, (
+        "catalog_manager must read _last_fetch via direct attribute access."
+    )

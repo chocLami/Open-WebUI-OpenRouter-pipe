@@ -55,6 +55,8 @@ def mock_valves():
     valves.ENDPOINT_OVERRIDE_CONFLICT_TEMPLATE = "Endpoint conflict: {reason}"
     valves.MODEL_RESTRICTED_TEMPLATE = "Model restricted: {restriction_reasons}"
     valves.OPENROUTER_ERROR_TEMPLATE = "Error: {detail}"
+    valves.ZDR_ENFORCE = False
+    valves.ALLOW_USER_ZDR_OVERRIDE = False
     valves.REASONING_EFFORT = "medium"
     valves.TASK_MODEL_REASONING_EFFORT = "low"
     valves.USE_MODEL_MAX_OUTPUT_TOKENS = False

@@ -4837,6 +4837,375 @@ async def test_zdr_enforce_rejects_non_zdr_model():
         assert captured_payloads == []
     finally:
         await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_zdr_enforce_fails_closed_when_zdr_endpoint_unavailable(caplog):
+    """ZDR_ENFORCE=True with an unavailable ZDR endpoint must fail-closed:
+    no upstream request, error logged."""
+    import logging as _logging
+
+    pipe = Pipe()
+
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+        pipe.valves.ZDR_ENFORCE = True
+
+        captured_payloads: list[dict] = []
+        callback = _smart_callback(captured_payloads, "Response")
+
+        async def event_emitter(event):
+            pass
+
+        with aioresponses() as mock_http, caplog.at_level(_logging.ERROR, logger="open_webui_openrouter_pipe.pipe"):
+            mock_http.post(
+                "https://openrouter.ai/api/v1/responses",
+                callback=callback,
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload={"data": [{"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"}]},
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/endpoints/zdr",
+                status=500,
+                payload={"error": "service unavailable"},
+                repeat=True,
+            )
+
+            body = {
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "test"}],
+                "stream": True,
+            }
+
+            result = await pipe.pipe(
+                body=body,
+                __user__={"id": "user_zdr_fail_closed"},
+                __request__=None,
+                __event_emitter__=event_emitter,
+                __event_call__=None,
+                __metadata__={"model": {"id": "openai/gpt-4o-mini"}},
+                __tools__=None,
+                __task__=None,
+                __task_body__=None,
+            )
+
+            await _consume_stream(result)
+
+        assert captured_payloads == [], (
+            f"Expected no upstream request when ZDR endpoint unavailable; "
+            f"got {len(captured_payloads)} payload(s)"
+        )
+        # The orchestrator logs the rejection with the unavailable marker.
+        joined_logs = "\n".join(record.getMessage() for record in caplog.records)
+        assert "ZDR endpoint list is unavailable" in joined_logs, (
+            f"Expected fail-closed log message; got: {joined_logs}"
+        )
+    finally:
+        await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_zdr_enforce_passes_when_endpoint_available_and_model_zdr_capable():
+    """ZDR_ENFORCE=True + healthy ZDR endpoint + ZDR-capable model: request proceeds."""
+    pipe = Pipe()
+
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+        pipe.valves.ZDR_ENFORCE = True
+
+        captured_payloads: list[dict] = []
+        callback = _smart_callback(captured_payloads, "Response")
+
+        async def event_emitter(event):
+            pass
+
+        with aioresponses() as mock_http:
+            mock_http.post(
+                "https://openrouter.ai/api/v1/responses",
+                callback=callback,
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload={"data": [{"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"}]},
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/endpoints/zdr",
+                payload={"data": [{"model_id": "openai/gpt-4o-mini"}]},
+                repeat=True,
+            )
+
+            body = {
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "test"}],
+                "stream": True,
+            }
+
+            result = await pipe.pipe(
+                body=body,
+                __user__={"id": "user_zdr_ok"},
+                __request__=None,
+                __event_emitter__=event_emitter,
+                __event_call__=None,
+                __metadata__={"model": {"id": "openai/gpt-4o-mini"}},
+                __tools__=None,
+                __task__=None,
+                __task_body__=None,
+            )
+
+            await _consume_stream(result)
+
+        # Healthy path: request proceeded, payload was captured.
+        assert len(captured_payloads) == 1, (
+            f"Expected 1 upstream request when ZDR healthy + capable; got {len(captured_payloads)}"
+        )
+    finally:
+        await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_zdr_enforce_fail_closed_after_transient_zdr_outage_clears_stale_cache(caplog):
+    """A successful ZDR fetch followed by a ZDR-only outage on a subsequent
+    refresh must CLEAR `_zdr_model_ids`, so the next ZDR_ENFORCE request
+    fail-closes instead of routing on stale data."""
+    import logging as _logging
+    from open_webui_openrouter_pipe.models.registry import OpenRouterModelRegistry
+
+    pipe = Pipe()
+
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+        pipe.valves.ZDR_ENFORCE = True
+
+        captured_payloads: list[dict] = []
+        callback = _smart_callback(captured_payloads, "Response")
+
+        async def event_emitter(event):
+            pass
+
+        models_payload = {"data": [{"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"}]}
+
+        with aioresponses() as mock_http, caplog.at_level(_logging.INFO, logger="open_webui_openrouter_pipe.pipe"):
+            mock_http.post(
+                "https://openrouter.ai/api/v1/responses",
+                callback=callback,
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload=models_payload,
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/endpoints/zdr",
+                payload={"data": [{"model_id": "openai/gpt-4o-mini"}]},
+            )
+
+            body = {
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "warmup"}],
+                "stream": True,
+            }
+            result = await pipe.pipe(
+                body=body,
+                __user__={"id": "user_warmup"},
+                __request__=None,
+                __event_emitter__=event_emitter,
+                __event_call__=None,
+                __metadata__={"model": {"id": "openai/gpt-4o-mini"}},
+                __tools__=None,
+                __task__=None,
+                __task_body__=None,
+            )
+            await _consume_stream(result)
+
+            assert OpenRouterModelRegistry._zdr_model_ids is not None
+            assert len(captured_payloads) == 1
+
+            OpenRouterModelRegistry._last_fetch = 0.0
+            OpenRouterModelRegistry._next_refresh_after = 0.0
+
+            mock_http.get(
+                "https://openrouter.ai/api/v1/endpoints/zdr",
+                status=500,
+                payload={"error": "service unavailable"},
+                repeat=True,
+            )
+
+            captured_payloads.clear()
+            body2 = {
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "after-outage"}],
+                "stream": True,
+            }
+            result2 = await pipe.pipe(
+                body=body2,
+                __user__={"id": "user_after_outage"},
+                __request__=None,
+                __event_emitter__=event_emitter,
+                __event_call__=None,
+                __metadata__={"model": {"id": "openai/gpt-4o-mini"}},
+                __tools__=None,
+                __task__=None,
+                __task_body__=None,
+            )
+            await _consume_stream(result2)
+
+        assert OpenRouterModelRegistry._zdr_model_ids is None, (
+            "Transient ZDR outage on a subsequent refresh must clear _zdr_model_ids "
+            "(security fix: stale data must not route ZDR_ENFORCE requests)."
+        )
+        assert captured_payloads == [], (
+            "Stale ZDR cache routed an upstream request after transient outage; "
+            "fail-closed semantic violated."
+        )
+        joined_logs = "\n".join(record.getMessage() for record in caplog.records)
+        assert "ZDR endpoint list is unavailable" in joined_logs, (
+            f"Expected fail-closed log; got: {joined_logs}"
+        )
+    finally:
+        await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_catalog_failure_clears_zdr_cache():
+    """If the chat catalog fetch (`/models`) itself fails after a previously
+    successful refresh, `_zdr_model_ids` must be cleared so subsequent
+    ZDR_ENFORCE requests fail-closed instead of routing on stale data."""
+    from open_webui_openrouter_pipe.models.registry import OpenRouterModelRegistry
+    import aiohttp as _aiohttp
+    import logging as _logging
+
+    pipe = Pipe()
+
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+
+        with aioresponses() as mock_http:
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload={"data": [{"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"}]},
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/endpoints/zdr",
+                payload={"data": [{"model_id": "openai/gpt-4o-mini"}]},
+            )
+            async with _aiohttp.ClientSession() as session:
+                await OpenRouterModelRegistry.ensure_loaded(
+                    session,
+                    base_url=pipe.valves.BASE_URL,
+                    api_key="test-api-key",
+                    cache_seconds=3600,
+                    logger=_logging.getLogger("test"),
+                )
+
+        assert OpenRouterModelRegistry._zdr_model_ids is not None
+        assert "openai.gpt-4o-mini" in OpenRouterModelRegistry._zdr_model_ids
+
+        OpenRouterModelRegistry._last_fetch = 0.0
+        OpenRouterModelRegistry._next_refresh_after = 0.0
+
+        with aioresponses() as mock_http:
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                status=500,
+                payload={"error": "service unavailable"},
+            )
+            async with _aiohttp.ClientSession() as session:
+                await OpenRouterModelRegistry.ensure_loaded(
+                    session,
+                    base_url=pipe.valves.BASE_URL,
+                    api_key="test-api-key",
+                    cache_seconds=3600,
+                    logger=_logging.getLogger("test"),
+                )
+
+        assert OpenRouterModelRegistry._zdr_model_ids is None, (
+            "Catalog fetch failure must clear _zdr_model_ids — security: stale "
+            "ZDR data must not survive catalog outages."
+        )
+    finally:
+        await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_zdr_enforce_fail_closed_uses_distinct_restriction_reason_from_capable_check(caplog):
+    """When ZDR is healthy but the model is not ZDR-capable, the existing
+    ZDR_ENFORCE log path is taken (not the new fail-closed path)."""
+    import logging as _logging
+
+    pipe = Pipe()
+
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+        pipe.valves.ZDR_ENFORCE = True
+
+        captured_payloads: list[dict] = []
+        callback = _smart_callback(captured_payloads, "Response")
+
+        async def event_emitter(event):
+            pass
+
+        with aioresponses() as mock_http, caplog.at_level(_logging.WARNING, logger="open_webui_openrouter_pipe.pipe"):
+            mock_http.post(
+                "https://openrouter.ai/api/v1/responses",
+                callback=callback,
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload={"data": [{"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"}]},
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/endpoints/zdr",
+                payload={"data": [{"model_id": "openai/gpt-4o"}]},
+                repeat=True,
+            )
+
+            body = {
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "test"}],
+                "stream": True,
+            }
+
+            result = await pipe.pipe(
+                body=body,
+                __user__={"id": "user_zdr_not_capable"},
+                __request__=None,
+                __event_emitter__=event_emitter,
+                __event_call__=None,
+                __metadata__={"model": {"id": "openai/gpt-4o-mini"}},
+                __tools__=None,
+                __task__=None,
+                __task_body__=None,
+            )
+
+            await _consume_stream(result)
+
+        assert captured_payloads == []
+        joined_logs = "\n".join(record.getMessage() for record in caplog.records)
+        assert "Model restricted due to ZDR enforcement" in joined_logs, (
+            f"Expected the existing ZDR_ENFORCE log; got: {joined_logs}"
+        )
+        assert "ZDR endpoint list is unavailable" not in joined_logs, (
+            "Should NOT use the fail-closed log when the ZDR endpoint is available; "
+            f"got: {joined_logs}"
+        )
+    finally:
+        await pipe.close()
+
+
 # -----------------------------------------------------------------------------
 # Additional Coverage Tests: Tool Renames with Actual Renames (line 624)
 # -----------------------------------------------------------------------------

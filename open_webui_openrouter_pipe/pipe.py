@@ -755,6 +755,7 @@ class Pipe:
                         valves=self.valves,
                         api_key=api_key_value,
                         logger=self.logger,
+                        cache_seconds=self.valves.MODEL_CATALOG_REFRESH_SECONDS,
                     )
         except ValueError as exc:
             refresh_error = exc
@@ -1809,6 +1810,7 @@ class Pipe:
                     valves=valves,
                     api_key=api_key_value or "",
                     logger=self.logger,
+                    cache_seconds=valves.MODEL_CATALOG_REFRESH_SECONDS,
                 )
         except ValueError as exc:
             await self._ensure_error_formatter()._emit_error(

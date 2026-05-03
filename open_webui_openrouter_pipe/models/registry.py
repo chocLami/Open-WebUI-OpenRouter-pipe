@@ -262,6 +262,7 @@ class OpenRouterModelRegistry:
                 resp.raise_for_status()
                 payload = await resp.json()
         except Exception as exc:
+            cls._zdr_model_ids = None
             logger.error("Failed to load OpenRouter model catalog: %s", exc)
             raise
 
@@ -359,16 +360,35 @@ class OpenRouterModelRegistry:
             if zdr_model_ids is not None:
                 specs[norm_id]["zdr_capable"] = norm_id in zdr_model_ids
 
-        models.sort(key=lambda m: m["name"].lower())
+        models.sort(key=lambda m: str(m.get("name") or "").lower())
         if not models:
             raise RuntimeError("OpenRouter returned an empty model catalog.")
+
+        existing_video_norms = {
+            n for n, s in cls._specs.items()
+            if "video_generation" in (s.get("features") or set())
+        }
+        if existing_video_norms:
+            for n in existing_video_norms:
+                if n not in specs:
+                    specs[n] = cls._specs[n]
+                if n not in id_map and n in cls._id_map:
+                    id_map[n] = cls._id_map[n]
+            existing_norms_in_models = {m.get("norm_id") for m in models}
+            preserved_video_models = [
+                m for m in cls._models
+                if m.get("norm_id") in existing_video_norms
+                and m.get("norm_id") not in existing_norms_in_models
+            ]
+            if preserved_video_models:
+                models.extend(preserved_video_models)
+                models.sort(key=lambda m: str(m.get("name") or "").lower())
+
         cls._models = models
         cls._specs = specs
         cls._id_map = id_map
-        if zdr_model_ids is not None:
-            cls._zdr_model_ids = zdr_model_ids
+        cls._zdr_model_ids = zdr_model_ids
 
-        # Share dynamic specs with ModelFamily for downstream feature checks.
         ModelFamily.set_dynamic_specs(specs)
 
     @classmethod
@@ -534,6 +554,7 @@ class OpenRouterModelRegistry:
         return enriched
 
     _last_video_fetch: float = 0.0
+    _last_video_attempt: float = 0.0
 
     @classmethod
     def last_video_fetch(cls) -> float:
@@ -546,32 +567,47 @@ class OpenRouterModelRegistry:
         return cls._last_video_fetch
 
     @classmethod
+    def last_video_attempt(cls) -> float:
+        """Return the timestamp of the most recent video catalog fetch attempt.
+
+        Bumped on EVERY fetch outcome (success-non-empty, success-empty, error)
+        so the loader's TTL gate engages even when the endpoint is down or
+        reports zero models. `_last_video_fetch` (data-change) and this
+        attempt clock are separate so `catalog_manager.sync_key` doesn't
+        invalidate on empty/error fetches.
+        """
+        return cls._last_video_attempt
+
+    @classmethod
+    def record_video_attempt(cls) -> None:
+        """Stamp `_last_video_attempt` with the current time."""
+        cls._last_video_attempt = time.time()
+
+    @classmethod
     def register_video_models(cls, video_models: list[dict[str, Any]]) -> None:
         """Register OpenRouter async video-generation models as selectable models."""
         if not isinstance(video_models, list):
             return
 
+        new_specs = dict(cls._specs)
+        new_id_map = dict(cls._id_map)
+
         old_video_norms = {
             norm_id
-            for norm_id, spec in cls._specs.items()
+            for norm_id, spec in new_specs.items()
             if "video_generation" in set(spec.get("features") or set())
         }
         if old_video_norms:
-            cls._models = [
-                model
-                for model in cls._models
-                if model.get("norm_id") not in old_video_norms
-            ]
             for norm_id in old_video_norms:
-                cls._specs.pop(norm_id, None)
-                cls._id_map.pop(norm_id, None)
+                new_specs.pop(norm_id, None)
+                new_id_map.pop(norm_id, None)
 
         models_by_norm: dict[str, dict[str, Any]] = {}
         for model in cls._models:
             if not isinstance(model, dict):
                 continue
             norm = model.get("norm_id")
-            if isinstance(norm, str) and norm:
+            if isinstance(norm, str) and norm and norm not in old_video_norms:
                 models_by_norm[norm] = dict(model)
 
         for item in video_models:
@@ -599,14 +635,14 @@ class OpenRouterModelRegistry:
             if accepts_frame_images:
                 features.update({"vision", "file_input"})
 
-            cls._id_map[norm_id] = original_id
+            new_id_map[norm_id] = original_id
             models_by_norm[norm_id] = {
                 "id": sanitized,
                 "norm_id": norm_id,
                 "original_id": original_id,
                 "name": item.get("name") or original_id,
             }
-            cls._specs[norm_id] = {
+            new_specs[norm_id] = {
                 "features": features,
                 "capabilities": {
                     # Video models always advertise vision + file_upload + image_generation
@@ -635,12 +671,17 @@ class OpenRouterModelRegistry:
                 "zdr_capable": False,
             }
 
+        # Sync readers (list_models, spec, is_zdr_capable) access these without
+        # locking. The next four statements (three attribute assignments + the
+        # set_dynamic_specs call) must remain contiguous and synchronous — any
+        # await/yield between them lets a reader observe a model in _models
+        # whose norm_id is not yet in _specs (or vice versa).
+        cls._specs = new_specs
+        cls._id_map = new_id_map
         cls._models = sorted(models_by_norm.values(), key=lambda m: str(m.get("name") or "").lower())
         ModelFamily.set_dynamic_specs(cls._specs)
-        # Bump the video-fetch timestamp so the catalog manager's sync_key picks up the
-        # newly-registered video models and re-runs metadata sync to install per-model
-        # filters and write rows for them.
-        cls._last_video_fetch = time.time()
+        if video_models:
+            cls._last_video_fetch = time.time()
 
     @classmethod
     def api_model_id(cls, model_id: str) -> Optional[str]:

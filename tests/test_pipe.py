@@ -9781,3 +9781,69 @@ class TestSumPricingValuesPaths:
         result = sum_pricing_values("not_a_number")
         assert result == (Decimal(0), 0)
 
+
+@pytest.mark.asyncio
+async def test_pipes_video_catalog_uses_ttl_cache_seconds():
+    """A second pipes() call within MODEL_CATALOG_REFRESH_SECONDS must not refetch /videos/models."""
+    from open_webui_openrouter_pipe.models.registry import OpenRouterModelRegistry
+    from open_webui_openrouter_pipe.integrations import video_catalog as _vc
+
+    OpenRouterModelRegistry._last_video_fetch = 0.0
+    OpenRouterModelRegistry._models = []
+    OpenRouterModelRegistry._specs = {}
+
+    list_models_call_count = {"value": 0}
+
+    fixture_video_model = {
+        "id": "google/veo-3.1",
+        "name": "Veo 3.1",
+        "description": "Test video model",
+        "supported_resolutions": ["720p"],
+        "supported_aspect_ratios": ["16:9"],
+        "allowed_passthrough_parameters": ["aspect_ratio"],
+        "pricing": {},
+        "architecture": {},
+    }
+
+    class _CountingClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def list_models(self):
+            list_models_call_count["value"] += 1
+            return [fixture_video_model]
+
+    pipe = Pipe()
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+        pipe.valves.ENABLE_VIDEO_GENERATION = True
+        pipe.valves.MODEL_CATALOG_REFRESH_SECONDS = 3600
+
+        with patch.object(_vc, "OpenRouterVideoClient", _CountingClient):
+            with aioresponses() as mock_http:
+                mock_http.get(
+                    "https://openrouter.ai/api/v1/models",
+                    payload={"data": [{"id": "openai/gpt-4o", "name": "GPT-4o"}]},
+                    repeat=True,
+                )
+                mock_http.get(
+                    "https://openrouter.ai/api/v1/endpoints/zdr",
+                    payload={"data": []},
+                    repeat=True,
+                )
+
+                await pipe.pipes()
+                first_call_count = list_models_call_count["value"]
+                assert first_call_count == 1
+                # _last_video_fetch was bumped naturally by the non-empty registration above.
+                # Second pipes() within the TTL window must short-circuit.
+                await pipe.pipes()
+
+        assert list_models_call_count["value"] == first_call_count, (
+            f"Second pipes() call within TTL must NOT refetch /videos/models. "
+            f"first={first_call_count}, total={list_models_call_count['value']}"
+        )
+    finally:
+        await pipe.close()
+

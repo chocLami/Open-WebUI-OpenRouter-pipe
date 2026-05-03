@@ -503,9 +503,26 @@ class RequestOrchestrator:
                 )
                 return ""
             if zdr_capable is None:
-                self.logger.warning(
-                    "ZDR enforcement requested but ZDR endpoint list is unavailable; proceeding without validation."
+                if use_task_model_adapter:
+                    return self._pipe._build_task_fallback_content(task_name)
+                await self._pipe._ensure_error_formatter()._emit_templated_error(
+                    __event_emitter__,
+                    template=valves.MODEL_RESTRICTED_TEMPLATE,
+                    variables={
+                        "requested_model": responses_body.model,
+                        "normalized_model_id": normalized_model_id,
+                        "restriction_reasons": "ZDR_ENFORCE_UNAVAILABLE",
+                        "model_id_filter": "",
+                        "free_model_filter": "",
+                        "tool_calling_filter": "",
+                    },
+                    log_message=(
+                        f"Model rejected — ZDR enforcement requested but ZDR endpoint list is unavailable "
+                        f"(requested={responses_body.model}, normalized={normalized_model_id})"
+                    ),
+                    log_level=logging.ERROR,
                 )
+                return ""
 
             existing_provider = responses_body.provider or {}
             if isinstance(existing_provider, dict):

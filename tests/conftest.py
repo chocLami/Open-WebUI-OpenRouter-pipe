@@ -795,6 +795,8 @@ def _reset_model_registry():
     reg._id_map = {}
     reg._zdr_model_ids = None
     reg._last_fetch = 0.0
+    reg._last_video_fetch = 0.0
+    reg._last_video_attempt = 0.0
     reg._lock = asyncio.Lock()
     reg._next_refresh_after = 0.0
     reg._consecutive_failures = 0

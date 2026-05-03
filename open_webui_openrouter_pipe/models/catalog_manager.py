@@ -279,7 +279,7 @@ class ModelCatalogManager:
             return
         if not selected_models:
             return
-        last_fetch = getattr(OpenRouterModelRegistry, "_last_fetch", 0.0)
+        last_fetch = OpenRouterModelRegistry._last_fetch
         last_video_fetch = OpenRouterModelRegistry.last_video_fetch()
         sync_key = (
             pipe_identifier,

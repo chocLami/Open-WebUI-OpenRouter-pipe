@@ -1498,3 +1498,172 @@ def test_video_defaults_match_plan():
     assert valves.REMOTE_VIDEO_MAX_SIZE_MB == 500
     assert valves.VIDEO_MAX_POLL_TIME_SECONDS == 600
     assert valves.VIDEO_FRAME_TOTAL_MAX_BYTES == 50 * 1024 * 1024
+
+
+def _ttl_test_valves():
+    return SimpleNamespace(
+        ENABLE_VIDEO_GENERATION=True,
+        BASE_URL="https://openrouter.ai/api/v1",
+        HTTP_REFERER_OVERRIDE="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_video_catalog_loaded_respects_ttl_within_window():
+    from open_webui_openrouter_pipe.integrations.video_catalog import ensure_video_catalog_loaded
+
+    OpenRouterModelRegistry._last_video_attempt = time.time()
+    before_fetch = OpenRouterModelRegistry._last_video_fetch
+
+    await ensure_video_catalog_loaded(
+        session=cast(Any, None),
+        valves=_ttl_test_valves(),
+        api_key="unused",
+        logger=logging.getLogger("test"),
+        cache_seconds=3600,
+    )
+
+    assert OpenRouterModelRegistry._last_video_fetch == before_fetch
+
+
+@pytest.mark.asyncio
+async def test_ensure_video_catalog_loaded_refetches_after_ttl_expires(monkeypatch):
+    from open_webui_openrouter_pipe.integrations import video_catalog as _vc
+
+    OpenRouterModelRegistry._last_video_attempt = time.time() - 3601
+
+    list_models_called = False
+
+    class _StubClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def list_models(self):
+            nonlocal list_models_called
+            list_models_called = True
+            return []
+
+    monkeypatch.setattr(_vc, "OpenRouterVideoClient", _StubClient)
+
+    await _vc.ensure_video_catalog_loaded(
+        session=cast(Any, object()),
+        valves=_ttl_test_valves(),
+        api_key="test",
+        logger=logging.getLogger("test"),
+        cache_seconds=3600,
+    )
+
+    assert list_models_called
+
+
+@pytest.mark.asyncio
+async def test_ensure_video_catalog_loaded_empty_result_engages_attempt_ttl_without_bumping_fetch_timestamp(monkeypatch):
+    from open_webui_openrouter_pipe.integrations import video_catalog as _vc
+
+    OpenRouterModelRegistry._last_video_fetch = 100.0
+    OpenRouterModelRegistry._last_video_attempt = 0.0
+
+    class _StubClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def list_models(self):
+            return []
+
+    monkeypatch.setattr(_vc, "OpenRouterVideoClient", _StubClient)
+
+    before_attempt = time.time()
+    await _vc.ensure_video_catalog_loaded(
+        session=cast(Any, object()),
+        valves=_ttl_test_valves(),
+        api_key="test",
+        logger=logging.getLogger("test"),
+        cache_seconds=3600,
+    )
+
+    assert OpenRouterModelRegistry._last_video_fetch == 100.0, (
+        "_last_video_fetch (sync_key invalidator) must NOT bump on empty result"
+    )
+    assert OpenRouterModelRegistry._last_video_attempt >= before_attempt, (
+        "_last_video_attempt (TTL gate) must bump on every fetch attempt — including empty"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_video_catalog_loaded_network_failure_engages_attempt_ttl(monkeypatch):
+    from open_webui_openrouter_pipe.integrations import video_catalog as _vc
+
+    OpenRouterModelRegistry._last_video_fetch = 100.0
+    OpenRouterModelRegistry._last_video_attempt = 0.0
+
+    class _RaisingClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def list_models(self):
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(_vc, "OpenRouterVideoClient", _RaisingClient)
+
+    before_attempt = time.time()
+    await _vc.ensure_video_catalog_loaded(
+        session=cast(Any, object()),
+        valves=_ttl_test_valves(),
+        api_key="test",
+        logger=logging.getLogger("test"),
+        cache_seconds=3600,
+    )
+
+    assert OpenRouterModelRegistry._last_video_fetch == 100.0, (
+        "_last_video_fetch must NOT bump on network failure"
+    )
+    assert OpenRouterModelRegistry._last_video_attempt >= before_attempt, (
+        "_last_video_attempt must bump even on network failure to prevent refetch storm"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_video_catalog_loaded_propagates_cancelled_error_without_bumping_attempt(monkeypatch):
+    from open_webui_openrouter_pipe.integrations import video_catalog as _vc
+
+    OpenRouterModelRegistry._last_video_attempt = 0.0
+
+    class _CancellingClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def list_models(self):
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(_vc, "OpenRouterVideoClient", _CancellingClient)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _vc.ensure_video_catalog_loaded(
+            session=cast(Any, object()),
+            valves=_ttl_test_valves(),
+            api_key="test",
+            logger=logging.getLogger("test"),
+            cache_seconds=3600,
+        )
+
+    assert OpenRouterModelRegistry._last_video_attempt == 0.0, (
+        "CancelledError must NOT bump _last_video_attempt — user cancellation "
+        "should not engage the TTL gate and block the next legitimate retry."
+    )
+
+
+def test_register_video_models_with_empty_list_does_not_bump_last_video_fetch():
+    OpenRouterModelRegistry._last_video_fetch = 0.0
+
+    OpenRouterModelRegistry.register_video_models([])
+
+    assert OpenRouterModelRegistry._last_video_fetch == 0.0
+
+
+def test_register_video_models_with_models_does_bump_last_video_fetch():
+    OpenRouterModelRegistry._last_video_fetch = 0.0
+    before = time.time()
+
+    OpenRouterModelRegistry.register_video_models([VIDEO_BY_ID["openai/sora-2-pro"]])
+
+    assert OpenRouterModelRegistry._last_video_fetch >= before
