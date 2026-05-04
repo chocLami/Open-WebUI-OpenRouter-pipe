@@ -993,6 +993,156 @@ class Filter:
         )
 
     # =========================================================================
+    # OPENROUTER NATIVE IMAGE FILTERS (generic / gemini / sourceful)
+    # =========================================================================
+    #
+
+    _GEMINI_IMAGE_PATTERN = re.compile(r"^google/gemini-.*flash-image.*-preview$")
+    _SOURCEFUL_IMAGE_PATTERN = re.compile(r"^sourceful/riverflow-v\d+(\.\d+)?-(pro|fast)$")
+
+    @staticmethod
+    def render_openrouter_image_filter_source(variant: str) -> str:
+        from .image_filter_renderer import (
+            render_generic_image_filter_source,
+            render_gemini_image_filter_source,
+            render_sourceful_image_filter_source,
+        )
+        if variant == "generic":
+            return render_generic_image_filter_source()
+        if variant == "gemini":
+            return render_gemini_image_filter_source()
+        if variant == "sourceful":
+            return render_sourceful_image_filter_source()
+        raise ValueError(f"Unknown image filter variant: {variant!r}")
+
+    @timed
+    async def ensure_openrouter_image_filter_function_ids(
+        self,
+        models: list[dict[str, Any]],
+    ) -> dict[str, list[str]]:
+        """Install image filters lazily and return per-model attachment list.
+
+        Returns `dict[model_id, list[function_id]]` where each list contains:
+        - generic_id always (for any model with `image_output` feature)
+        - generic_id + gemini_id for Gemini Flash Image Preview models
+        - generic_id + sourceful_id for Sourceful Riverflow Pro/Fast models
+
+        """
+        from ..models.registry import ModelFamily
+
+        installed: dict[str, list[str]] = {}
+        generic_id: str | None = None
+        gemini_id: str | None = None
+        sourceful_id: str | None = None
+        # Sentinel: empty string means we attempted install and failed.
+        for model in models:
+            model_id = model.get("id")
+            if not isinstance(model_id, str) or not model_id.strip():
+                continue
+            model_id = model_id.strip()
+            try:
+                if not ModelFamily.supports("image_output", model_id):
+                    continue
+            except Exception:
+                continue
+
+            original_id = model.get("original_id")
+            canonical_id = original_id if isinstance(original_id, str) and original_id.strip() else model_id
+            ids: list[str] = []
+
+            if generic_id is None:
+                try:
+                    generic_id = await self._ensure_single_image_filter_function_id("generic")
+                except Exception as exc:
+                    self.logger.debug("Generic image filter install failed: %s", exc)
+                    generic_id = ""
+            if generic_id:
+                ids.append(generic_id)
+
+            if self._GEMINI_IMAGE_PATTERN.match(canonical_id):
+                if gemini_id is None:
+                    try:
+                        gemini_id = await self._ensure_single_image_filter_function_id("gemini")
+                    except Exception as exc:
+                        self.logger.debug("Gemini image filter install failed: %s", exc)
+                        gemini_id = ""
+                if gemini_id:
+                    ids.append(gemini_id)
+
+            if self._SOURCEFUL_IMAGE_PATTERN.match(canonical_id):
+                if sourceful_id is None:
+                    try:
+                        sourceful_id = await self._ensure_single_image_filter_function_id("sourceful")
+                    except Exception as exc:
+                        self.logger.debug("Sourceful image filter install failed: %s", exc)
+                        sourceful_id = ""
+                if sourceful_id:
+                    ids.append(sourceful_id)
+
+            if ids:
+                # list(ids) for both keys to avoid shared-reference aliasing
+                installed[model_id] = list(ids)
+                if isinstance(original_id, str) and original_id.strip() and original_id != model_id:
+                    installed[original_id] = list(ids)
+        return installed
+
+    async def _ensure_single_image_filter_function_id(
+        self,
+        variant: str,
+    ) -> str | None:
+        from .image_filter_renderer import (
+            build_generic_image_filter_spec,
+            build_gemini_image_filter_spec,
+            build_sourceful_image_filter_spec,
+        )
+        if variant == "generic":
+            spec = build_generic_image_filter_spec()
+        elif variant == "gemini":
+            spec = build_gemini_image_filter_spec()
+        elif variant == "sourceful":
+            spec = build_sourceful_image_filter_spec()
+        else:
+            raise ValueError(f"Unknown image filter variant: {variant!r}")
+
+        marker_token = f'OWUI_OPENROUTER_PIPE_MARKER = "{spec.marker}"'
+        variant_token = f'IMAGE_FILTER_VARIANT = "{spec.variant}"'
+
+        def _matches(content: str) -> bool:
+            if not isinstance(content, str) or not content:
+                return False
+            return (
+                marker_token in content
+                and variant_token in content
+                and "class Filter" in content
+            )
+
+        desired_source = self.render_openrouter_image_filter_source(variant).strip() + "\n"
+        valid, error = self.validate_filter_source(desired_source)
+        if not valid:
+            raise ValueError(f"Generated OpenRouter image filter ({variant}) is invalid: {error}")
+
+        return await self._ensure_filter_installed(
+            desired_source=desired_source,
+            desired_name=spec.display_name[:80],
+            desired_meta={
+                "description": (
+                    f"Configure OpenRouter native image generation ({spec.variant})."
+                ),
+                "toggle": True,
+                "manifest": {
+                    "title": spec.display_name[:80],
+                    "id": spec.function_id,
+                    "version": "0.1.0",
+                    "license": "MIT",
+                },
+            },
+            preferred_id=spec.function_id,
+            auto_install_valve="AUTO_INSTALL_IMAGE_FILTERS",
+            log_label=f"OpenRouter image filter ({spec.variant})",
+            matches_candidate=_matches,
+        )
+
+    # =========================================================================
     # DIRECT UPLOADS FILTER
     # =========================================================================
 

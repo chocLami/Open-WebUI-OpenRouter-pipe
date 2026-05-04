@@ -36,6 +36,39 @@ if TYPE_CHECKING:
     from ..streaming.event_emitter import EventEmitter
 
 
+def _inject_image_modalities(
+    body: dict[str, Any],
+    *,
+    logger: logging.Logger | None = None,
+) -> None:
+ 
+    if not isinstance(body, dict):
+        return
+    raw_model = body.get("model")
+    if not isinstance(raw_model, str) or not raw_model:
+        return
+    if "modalities" in body:
+        return
+
+    spec = OpenRouterModelRegistry.spec(raw_model)
+    if not isinstance(spec, dict):
+        return
+    arch = spec.get("architecture") or {}
+    out_mods = arch.get("output_modalities") or []
+    if "image" not in out_mods:
+        return
+    if "text" in out_mods:
+        body["modalities"] = ["image", "text"]
+    else:
+        body["modalities"] = ["image"]
+    if logger is not None and logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "Injected modalities=%s for image-output model %r",
+            body["modalities"],
+            raw_model,
+        )
+
+
 class RequestOrchestrator:
     """Orchestrates the processing of transformed OpenRouter requests."""
 
@@ -412,6 +445,8 @@ class RequestOrchestrator:
                     "Forcing /chat/completions endpoint for preset parameter (preset=%s)",
                     body.get("preset"),
                 )
+
+        _inject_image_modalities(body, logger=self.logger)
 
         completions_body = CompletionsBody.model_validate(body)
 

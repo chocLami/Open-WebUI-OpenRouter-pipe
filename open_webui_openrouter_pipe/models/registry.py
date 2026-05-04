@@ -448,6 +448,7 @@ class OpenRouterModelRegistry:
         output_modalities = architecture.get("output_modalities") or []
         if "image" in output_modalities:
             features.add("image_gen_tool")
+            features.add("image_output")
 
         input_modalities = architecture.get("input_modalities") or []
         if "image" in input_modalities:
@@ -682,6 +683,166 @@ class OpenRouterModelRegistry:
         ModelFamily.set_dynamic_specs(cls._specs)
         if video_models:
             cls._last_video_fetch = time.time()
+
+    _last_image_fetch: float = 0.0
+    _last_image_attempt: float = 0.0
+
+    @classmethod
+    def last_image_fetch(cls) -> float:
+        """Return the timestamp of the last successful image catalog registration.
+
+        Used by `maybe_schedule_model_metadata_sync` to detect when image-only
+        models appeared in `cls._models` so the metadata sync re-runs and
+        auto-attaches the per-model image filters.
+        """
+        return cls._last_image_fetch
+
+    @classmethod
+    def last_image_attempt(cls) -> float:
+        """Return the timestamp of the most recent image catalog fetch attempt."""
+        return cls._last_image_attempt
+
+    @classmethod
+    def record_image_attempt(cls) -> None:
+        """Stamp `_last_image_attempt` with the current time."""
+        cls._last_image_attempt = time.time()
+
+    @classmethod
+    def reset_image_fetch_timestamp(cls) -> None:
+        """Reset `_last_image_fetch` to 0.
+
+        Called by `image_catalog.ensure_image_catalog_loaded` after a master-disable
+        cleanup so subsequent disabled-state calls short-circuit (the cleanup is
+        idempotent but the redundant call would still log "cleared" each pass).
+        Mirror of how the chat catalog and video catalog avoid repeated cleanups.
+        """
+        cls._last_image_fetch = 0.0
+
+    @classmethod
+    def register_image_models(cls, image_models: list[dict[str, Any]]) -> None:
+        """Register OpenRouter pure-image-only models as selectable models.
+
+        Multimodal text+image models (output_modalities ⊇ {"text"}) already live
+        in the chat catalog with `image_gen_tool` set by `_derive_features`;
+        they are NOT touched here. Pure-image-only models (output_modalities
+        without "text") are absent from `/api/v1/models` and registered here
+        with `image_output` + `image_gen_tool` features.
+
+        Stale-norm cleanup mirrors `register_video_models`: any previously-
+        registered image-only norm that's no longer in the input list is
+        dropped from `_specs`/`_id_map`/`_models`. Chat models and video
+        models are preserved.
+        """
+        if not isinstance(image_models, list):
+            return
+
+        new_specs = dict(cls._specs)
+        new_id_map = dict(cls._id_map)
+
+        old_image_norms = {
+            norm_id
+            for norm_id, spec in new_specs.items()
+            if (
+                "image_output" in set(spec.get("features") or set())
+                and "video_generation" not in set(spec.get("features") or set())
+                and "text" not in (
+                    (spec.get("architecture") or {}).get("output_modalities") or []
+                )
+            )
+        }
+        if old_image_norms:
+            for norm_id in old_image_norms:
+                new_specs.pop(norm_id, None)
+                new_id_map.pop(norm_id, None)
+
+        # Preserve all non-image-only models (chat + video).
+        models_by_norm: dict[str, dict[str, Any]] = {}
+        for model in cls._models:
+            if not isinstance(model, dict):
+                continue
+            norm = model.get("norm_id")
+            if isinstance(norm, str) and norm and norm not in old_image_norms:
+                models_by_norm[norm] = dict(model)
+
+        for item in image_models:
+            if not isinstance(item, dict):
+                continue
+            original_id = item.get("id")
+            if not isinstance(original_id, str) or not original_id.strip():
+                continue
+            original_id = original_id.strip()
+            sanitized = sanitize_model_id(original_id)
+            norm_id = ModelFamily.base_model(sanitized)
+            if not norm_id:
+                continue
+
+            if norm_id in new_specs:
+                continue
+
+            arch_raw = item.get("architecture")
+            architecture: Dict[str, Any] = arch_raw if isinstance(arch_raw, dict) else {}
+            input_modalities = architecture.get("input_modalities") or []
+            output_modalities = architecture.get("output_modalities") or []
+            accepts_image_input = "image" in input_modalities
+
+            # Skip multimodal text+image models even when chat catalog hasn't
+            # registered them yet — they belong in the chat catalog with the
+            # full chat-style features. `_derive_features` adds `image_output`
+            # to those models via the chat path so the image filter still
+            # auto-attaches. Registering them here would over-write that with
+            # image-only features and lose tool-calling/reasoning capabilities.
+            if "text" in output_modalities:
+                continue
+
+            allowed_params = item.get("supported_parameters")
+            allowed_set = {
+                param
+                for param in allowed_params
+                if isinstance(param, str) and param
+            } if isinstance(allowed_params, list) else set()
+            pricing = item.get("pricing") if isinstance(item.get("pricing"), dict) else {}
+
+            features: set[str] = {"image_output", "image_gen_tool"}
+            if accepts_image_input:
+                features.update({"vision", "file_input"})
+
+            new_id_map[norm_id] = original_id
+            models_by_norm[norm_id] = {
+                "id": sanitized,
+                "norm_id": norm_id,
+                "original_id": original_id,
+                "name": item.get("name") or original_id,
+            }
+            new_specs[norm_id] = {
+                "features": features,
+                "capabilities": {
+                    "vision": accepts_image_input,
+                    "file_upload": True,
+                    "web_search": False,
+                    "image_generation": True,
+                    "video_generation": False,
+                    "code_interpreter": False,
+                    "citations": False,
+                    "status_updates": True,
+                    "usage": True,
+                },
+                "max_completion_tokens": None,
+                "supported_parameters": frozenset(allowed_set),
+                "full_model": dict(item),
+                "image_model": dict(item),
+                "context_length": item.get("context_length"),
+                "description": item.get("description"),
+                "pricing": pricing,
+                "architecture": architecture,
+                "zdr_capable": False,
+            }
+
+        cls._specs = new_specs
+        cls._id_map = new_id_map
+        cls._models = sorted(models_by_norm.values(), key=lambda m: str(m.get("name") or "").lower())
+        ModelFamily.set_dynamic_specs(cls._specs)
+        if image_models:
+            cls._last_image_fetch = time.time()
 
     @classmethod
     def api_model_id(cls, model_id: str) -> Optional[str]:

@@ -112,7 +112,7 @@ class ResponsesBody(BaseModel):
     provider: Optional[Dict[str, Any]] = None
     route: Optional[str] = None
     debug: Optional[Dict[str, Any]] = None
-    image_config: Optional[Union[str, float]] = None
+    image_config: Optional[Dict[str, Any]] = None
     modalities: Optional[List[str]] = None
     model_config = ConfigDict(extra="allow")  # allow additional OpenAI parameters automatically
 

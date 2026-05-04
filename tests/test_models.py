@@ -454,6 +454,8 @@ def test_maybe_schedule_model_metadata_sync_no_valves_enabled(pipe_instance) -> 
     pipe.valves.AUTO_ATTACH_IMAGE_GEN_FILTER = False
     pipe.valves.AUTO_INSTALL_VIDEO_FILTERS = False
     pipe.valves.AUTO_ATTACH_VIDEO_FILTERS = False
+    pipe.valves.AUTO_INSTALL_IMAGE_FILTERS = False
+    pipe.valves.AUTO_ATTACH_IMAGE_FILTERS = False
 
     pipe._catalog_manager.maybe_schedule_model_metadata_sync(
         [{"id": "test"}],
@@ -486,10 +488,13 @@ def test_maybe_schedule_model_metadata_sync_same_key_no_reschedule(pipe_instance
     last_fetch = getattr(OpenRouterModelRegistry, "_last_fetch", 0.0)
     last_video_fetch = OpenRouterModelRegistry.last_video_fetch()
 
+    last_image_fetch = OpenRouterModelRegistry.last_image_fetch()
+
     pipe._catalog_manager._model_metadata_sync_key = (
         "test_pipe",
         float(last_fetch or 0.0),
         float(last_video_fetch or 0.0),
+        float(last_image_fetch or 0.0),
         pipe.valves.MODEL_ID,
         pipe.valves.UPDATE_MODEL_IMAGES,
         pipe.valves.UPDATE_MODEL_CAPABILITIES,
@@ -505,6 +510,10 @@ def test_maybe_schedule_model_metadata_sync_same_key_no_reschedule(pipe_instance
         pipe.valves.AUTO_ATTACH_VIDEO_FILTERS,
         pipe.valves.AUTO_DEFAULT_VIDEO_FILTERS,
         pipe.valves.ENABLE_VIDEO_GENERATION,
+        pipe.valves.ENABLE_OPENROUTER_IMAGE_GENERATION,
+        pipe.valves.AUTO_INSTALL_IMAGE_FILTERS,
+        pipe.valves.AUTO_ATTACH_IMAGE_FILTERS,
+        pipe.valves.AUTO_DEFAULT_IMAGE_FILTERS,
         pipe.valves.ENABLE_WEB_SEARCH,
         pipe.valves.ENABLE_WEB_FETCH,
         pipe.valves.ENABLE_DATETIME,

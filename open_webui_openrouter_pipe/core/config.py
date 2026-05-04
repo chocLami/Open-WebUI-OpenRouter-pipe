@@ -55,6 +55,13 @@ _OPENROUTER_IMAGE_GEN_FILTER_PREFERRED_FUNCTION_ID = "openrouter_image_gen"
 # OpenRouter Video Generation filter
 _OPENROUTER_VIDEO_GEN_FILTER_MARKER = "openrouter_pipe:video_filter:v1"
 
+# OpenRouter Image Generation per-model filters (generic / gemini / sourceful).
+# Distinct namespace from `_OPENROUTER_IMAGE_GEN_FILTER_MARKER` which
+# wires the OpenAI Responses-API `image_generation_call` server-side TOOL onto
+# chat models. The new image filters configure NATIVE OpenRouter image-output
+# models via `body.image_config` request fields per image-generation.md.
+_OPENROUTER_IMAGE_FILTER_MARKER = "openrouter_pipe:image_filter:v1"
+
 _DIRECT_UPLOADS_FILTER_MARKER = "openrouter_pipe:direct_uploads_filter:v1"
 _DIRECT_UPLOADS_FILTER_PREFERRED_FUNCTION_ID = "openrouter_direct_uploads"
 
@@ -1571,6 +1578,43 @@ class Valves(BaseModel):
         default=True,
         description="Automatically attach the OpenRouter Image Generation filter to all pipe models.",
     )
+    # ── Native OpenRouter Image Filters (generic / Gemini / Sourceful) ──
+    # NOTE: Distinct from `AUTO_*_IMAGE_GEN_FILTER` valves above which control
+    # the LEGACY OpenAI Responses-API `image_generation_call` tool filter.
+    # These valves control the new per-family filters that configure native
+    # OpenRouter image-output models via `body.image_config`.
+    ENABLE_OPENROUTER_IMAGE_GENERATION: bool = Field(
+        default=True,
+        description=(
+            "Expose OpenRouter native image-output models (Sourceful, Flux, "
+            "Seedream, etc.) as chat models. Multimodal text+image models "
+            "(gpt-5-image, gemini-image variants) stay in the chat catalog "
+            "and get the generic image filter attached for image_config knobs."
+        ),
+    )
+    AUTO_INSTALL_IMAGE_FILTERS: bool = Field(
+        default=True,
+        description=(
+            "Automatically install/update the three OpenRouter native image "
+            "filters in Open WebUI (generic, Gemini-extended, Sourceful-extended)."
+        ),
+    )
+    AUTO_ATTACH_IMAGE_FILTERS: bool = Field(
+        default=True,
+        description=(
+            "Automatically attach the appropriate native image filters to "
+            "image-output models: generic to all, Gemini-extended to Gemini "
+            "Flash Image Preview, Sourceful-extended to Riverflow Pro/Fast."
+        ),
+    )
+    AUTO_DEFAULT_IMAGE_FILTERS: bool = Field(
+        default=True,
+        description=(
+            "Always keep the attached image filters enabled by default on "
+            "image-output models. Re-asserted on every sync."
+        ),
+    )
+
     AUTO_INSTALL_VIDEO_FILTERS: bool = Field(
         default=True,
         description="Automatically install/update the OpenRouter Video Generation companion filter function in Open WebUI.",

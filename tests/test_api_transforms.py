@@ -2940,6 +2940,81 @@ class TestFilterOpenrouterRequestResponsesExtensions:
         assert result["store"] is False
 
 
+class TestImageConfigPydanticRoundTrip:
+    """`image_config` on `ResponsesBody` is now `Optional[Dict[str, Any]]` (was `Optional[Union[str, float]]`).
+    The new image filters write nested dicts here; verify they survive Pydantic validation,
+    retain `extra` keys for forward-compat with provider-specific params (quality, background, etc.
+    per OpenRouter docs), and pass through `CompletionsBody`'s `extra='allow'` shape too.
+    """
+
+    def test_image_config_dict_round_trip_responses_body(self):
+        """`ResponsesBody.image_config` is the typed field — must accept full nested dict."""
+        from open_webui_openrouter_pipe.api.transforms import ResponsesBody
+
+        body = ResponsesBody.model_validate({
+            "model": "sourceful/riverflow-v2-pro",
+            "input": [],
+            "image_config": {
+                "aspect_ratio": "16:9",
+                "image_size": "2K",
+                "font_inputs": [{"font_url": "https://example.com/f.ttf", "text": "Hello"}],
+                "super_resolution_references": ["https://example.com/ref.jpg"],
+                "quality": "high",
+            },
+        })
+        assert body.image_config is not None
+        assert body.image_config["aspect_ratio"] == "16:9"
+        assert body.image_config["image_size"] == "2K"
+        assert body.image_config["font_inputs"] == [
+            {"font_url": "https://example.com/f.ttf", "text": "Hello"}
+        ]
+        assert body.image_config["super_resolution_references"] == [
+            "https://example.com/ref.jpg"
+        ]
+        # Forward-compat: unknown keys (quality, background, etc.) preserved
+        assert body.image_config["quality"] == "high"
+        # Round-trip through model_dump preserves shape
+        dumped = body.model_dump(exclude_none=True)
+        assert dumped["image_config"] == body.image_config
+
+    def test_image_config_gemini_extended_aspect_ratio(self):
+        """Gemini-only knobs (4:1, 1:4, 8:1, 1:8 aspect, 0.5K size) survive Pydantic round-trip."""
+        from open_webui_openrouter_pipe.api.transforms import ResponsesBody
+
+        body = ResponsesBody.model_validate({
+            "model": "google/gemini-3.1-flash-image-preview",
+            "input": [],
+            "image_config": {"aspect_ratio": "4:1", "image_size": "0.5K"},
+        })
+        assert body.image_config == {"aspect_ratio": "4:1", "image_size": "0.5K"}
+
+    def test_image_config_none_default_responses_body(self):
+        """When `image_config` is not provided, the typed field defaults to None."""
+        from open_webui_openrouter_pipe.api.transforms import ResponsesBody
+
+        body = ResponsesBody.model_validate({"model": "openai/gpt-4o", "input": []})
+        assert body.image_config is None
+
+    def test_image_config_passthrough_completions_body(self):
+        """`CompletionsBody` doesn't declare `image_config` typed but accepts it via
+        extra='allow'. Verify BOTH attribute access AND model_dump preserve the
+        dict — a regression that drops the field via dict-only path or strips
+        it from extras must be caught.
+        path orchestrator.py:416 takes (CompletionsBody.model_validate(body))."""
+        from open_webui_openrouter_pipe.api.transforms import CompletionsBody
+
+        body = CompletionsBody.model_validate({
+            "model": "openai/gpt-5-image",
+            "messages": [],
+            "image_config": {"aspect_ratio": "16:9", "image_size": "2K"},
+        })
+        # Attribute access — Pydantic v2 with extra="allow" exposes via getattr
+        assert getattr(body, "image_config", None) == {"aspect_ratio": "16:9", "image_size": "2K"}
+        # model_dump preservation
+        dumped = body.model_dump(exclude_none=True)
+        assert dumped["image_config"] == {"aspect_ratio": "16:9", "image_size": "2K"}
+
+
 class TestFromCompletionsPreservesStoreAndUser:
     """Verify store and user survive chat→responses conversion."""
 
