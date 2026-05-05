@@ -1076,9 +1076,7 @@ class VideoGenerationAdapter:
         try:
             await emitter(event)
         except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
-                raise
+            raise
         except Exception as exc:
             self.logger.debug("Video generation event emit failed: %s", exc)
 

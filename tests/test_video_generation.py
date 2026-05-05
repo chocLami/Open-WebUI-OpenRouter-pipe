@@ -1773,3 +1773,34 @@ def test_register_video_models_with_models_does_bump_last_video_fetch():
     OpenRouterModelRegistry.register_video_models([VIDEO_BY_ID["openai/sora-2-pro"]])
 
     assert OpenRouterModelRegistry._last_video_fetch >= before
+
+
+@pytest.mark.asyncio
+async def test_safe_emit_always_reraises_cancelled_error():
+    """Regression: _safe_emit must NOT swallow CancelledError under any condition.
+
+    Bug class: silently consuming CancelledError leaves anyio cancel scopes in
+    a confused state where a task is marked done but still tracked, triggering
+    the upstream anyio bug #1111 (100% CPU spin in _deliver_cancellation).
+    """
+    pipe = Pipe()
+    adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
+
+    async def cancelling_emitter(_event):
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter._safe_emit(cancelling_emitter, {"type": "status", "data": {}})
+
+
+@pytest.mark.asyncio
+async def test_safe_emit_swallows_non_cancelled_exceptions():
+    """Non-CancelledError exceptions are still suppressed (debug-logged) so
+    transient emit failures don't take down the lifecycle."""
+    pipe = Pipe()
+    adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
+
+    async def failing_emitter(_event):
+        raise RuntimeError("emit failed")
+
+    await adapter._safe_emit(failing_emitter, {"type": "status", "data": {}})
