@@ -206,9 +206,10 @@ class SessionLogManager:
                             self._queue.task_done()
 
         def _cleanup_loop() -> None:
-            while True:
-                if self._stop_event and self._stop_event.is_set():
-                    break
+            stop_event = self._stop_event
+            if stop_event is None:
+                return
+            while not stop_event.is_set():
                 try:
                     self.cleanup_archives()
                 except Exception:
@@ -217,10 +218,8 @@ class SessionLogManager:
                 with contextlib.suppress(Exception):
                     with self._lock:
                         interval = self._cleanup_interval_seconds
-                try:
-                    time.sleep(interval)
-                except Exception:
-                    time.sleep(60)
+                if stop_event.wait(timeout=max(0.0, float(interval))):
+                    break
 
         self._worker_thread = threading.Thread(
             target=_writer_loop,

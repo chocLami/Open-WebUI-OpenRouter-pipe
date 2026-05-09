@@ -15,14 +15,19 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import contextvars
 import inspect
 import json
 import logging
+import os
 import secrets
+import sys
+import threading
 import time
 import uuid
+import weakref
 from collections import defaultdict, deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -129,6 +134,34 @@ def _consume_background_task_exception(task: asyncio.Task) -> None:
     """Silently consume exceptions from background tasks to avoid 'Task exception was never retrieved' warnings."""
     with contextlib.suppress(asyncio.CancelledError, Exception):
         task.exception()
+
+
+_LIFECYCLE_REGISTRY_KEY = "_openrouter_pipe_lifecycle"
+
+
+class _LifecycleRegistry:
+    def __init__(self) -> None:
+        self._current: dict[str, weakref.ref["Pipe"]] = {}
+        self._lock = threading.Lock()
+
+    def swap_in(self, new: "Pipe") -> "Pipe | None":
+        with self._lock:
+            old_ref = self._current.get(new.id)
+            self._current[new.id] = weakref.ref(new)
+            return old_ref() if old_ref else None
+
+    def current(self, pipe_id: str) -> "Pipe | None":
+        with self._lock:
+            ref = self._current.get(pipe_id)
+            return ref() if ref else None
+
+
+def _get_lifecycle_registry():
+    reg = sys.modules.get(_LIFECYCLE_REGISTRY_KEY)
+    if reg is None:
+        reg = _LifecycleRegistry()
+        sys.modules[_LIFECYCLE_REGISTRY_KEY] = reg  # type: ignore[assignment]
+    return reg
 
 
 # -----------------------------------------------------------------------------
@@ -239,6 +272,16 @@ class Pipe:
         5. Startup check coordination
         6. Session logging setup
         """
+        self._draining: bool = False
+        self._closing: bool = False
+        self._close_lock: threading.Lock = threading.Lock()
+        self._close_done: concurrent.futures.Future | None = None
+        self._active_pipes_calls: int = 0
+
+        if os.environ.get("OWUI_PIPE_TEST_MODE") == "1":
+            self._init_minimal_for_tests()
+            return
+
         # Core pipe identity and configuration
         self.type = "manifold"
         self.valves = self.Valves()
@@ -258,6 +301,7 @@ class Pipe:
         self._log_queue_loop: asyncio.AbstractEventLoop | None = None
         self._log_worker_task: asyncio.Task | None = None
         self._log_worker_lock: asyncio.Lock | None = None
+        self._log_worker_start_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
 
         # Subsystem instances (created in __init__, configured later)
@@ -387,6 +431,8 @@ class Pipe:
             "Pipe initialized (subsystem delegation: ArtifactStore, MultimodalHandler, StreamingHandler, EventEmitterHandler)"
         )
 
+        self._attach_to_lifecycle_registry()
+
     @timed
     async def _ensure_async_subsystems_initialized(self):
         if self._initialized:
@@ -494,32 +540,35 @@ class Pipe:
         SessionLogger.set_main_loop(loop)
         SessionLogger.SESSION_LOG_MAX_LINES = self.valves.SESSION_LOG_MAX_LINES
 
-        # Capture self for the nested async function
-        pipe_self = self
+        pipe_ref = weakref.ref(self)
 
         @timed
         async def _ensure_worker() -> None:
-            if getattr(pipe_self, "_closed", False):
+            pipe = pipe_ref()
+            if pipe is None or getattr(pipe, "_closed", False):
                 return
             try:
-                async with pipe_self._log_worker_lock:  # type: ignore[arg-type]
-                    if getattr(pipe_self, "_closed", False):
+                async with pipe._log_worker_lock:  # type: ignore[arg-type]
+                    if getattr(pipe, "_closed", False):
                         return
-                    if pipe_self._log_worker_task and not pipe_self._log_worker_task.done():
+                    if pipe._log_worker_task and not pipe._log_worker_task.done():
                         return
-                    if pipe_self._log_queue is None:
-                        pipe_self._log_queue = asyncio.Queue(maxsize=1000)
-                        SessionLogger.set_log_queue(pipe_self._log_queue)
-                    pipe_self._log_worker_task = loop.create_task(
-                        Pipe._log_worker_loop(pipe_self._log_queue),
+                    if pipe._log_queue is None:
+                        pipe._log_queue = asyncio.Queue(maxsize=1000)
+                        SessionLogger.set_log_queue(pipe._log_queue)
+                    pipe._log_worker_task = loop.create_task(
+                        Pipe._log_worker_loop(pipe._log_queue),
                         name="openrouter-log-worker",
                     )
             except Exception:
                 # Never let background startup tasks create noisy "Task exception was never retrieved"
-                pipe_self.logger.debug("Log worker startup task failed", exc_info=True)
+                pipe.logger.debug("Log worker startup task failed", exc_info=True)
 
-        start_task = loop.create_task(_ensure_worker(), name="openrouter-log-worker-start")
-        start_task.add_done_callback(_consume_background_task_exception)
+        prev_start_task = self._log_worker_start_task
+        if prev_start_task and not prev_start_task.done():
+            prev_start_task.cancel()
+        self._log_worker_start_task = loop.create_task(_ensure_worker(), name="openrouter-log-worker-start")
+        self._log_worker_start_task.add_done_callback(_consume_background_task_exception)
 
     @timed
     def _maybe_start_redis(self) -> None:
@@ -915,6 +964,73 @@ class Pipe:
         __task__: Any = None,
         __task_body__: Any = None,
     ) -> AsyncGenerator[dict[str, Any] | str, None] | dict[str, Any] | str | None | JSONResponse:
+        if self._draining or self._closing:
+            raise RuntimeError(
+                "This pipe instance has been superseded by a newer version; please retry."
+            )
+        self._active_pipes_calls += 1
+        counter_transferred = False
+        try:
+            result = await self._pipe_impl(
+                body,
+                __user__,
+                __request__,
+                __event_emitter__,
+                __event_call__,
+                __metadata__,
+                __tools__,
+                __task__,
+                __task_body__,
+            )
+            if inspect.isasyncgen(result):
+                counter_transferred = True
+                state = {"released": False}
+                wrapped = self._wrap_stream_with_counter_release(result, state)
+                weakref.finalize(
+                    wrapped,
+                    Pipe._release_stream_counter,
+                    self,
+                    state,
+                )
+                return wrapped
+            return result
+        finally:
+            if not counter_transferred:
+                self._active_pipes_calls = max(0, self._active_pipes_calls - 1)
+                self._maybe_trigger_drain_close()
+
+    @staticmethod
+    def _release_stream_counter(pipe: "Pipe", state: dict) -> None:
+        if state.get("released"):
+            return
+        state["released"] = True
+        pipe._active_pipes_calls = max(0, pipe._active_pipes_calls - 1)
+        pipe._maybe_trigger_drain_close()
+
+    async def _wrap_stream_with_counter_release(
+        self,
+        inner: AsyncGenerator[dict[str, Any] | str, None],
+        state: dict,
+    ) -> AsyncGenerator[dict[str, Any] | str, None]:
+        try:
+            async for item in inner:
+                yield item
+        finally:
+            Pipe._release_stream_counter(self, state)
+
+    @timed
+    async def _pipe_impl(
+        self,
+        body: dict[str, Any],
+        __user__: dict[str, Any],
+        __request__: Request | None,
+        __event_emitter__: EventEmitter | None,
+        __event_call__: Callable[[dict[str, Any]], Awaitable[Any]] | None,
+        __metadata__: dict[str, Any],
+        __tools__: list[dict[str, Any]] | dict[str, Any] | None,
+        __task__: Any = None,
+        __task_body__: Any = None,
+    ) -> AsyncGenerator[dict[str, Any] | str, None] | dict[str, Any] | str | None | JSONResponse:
         """Entry point that enqueues work and awaits the isolated job result."""
         safe_event_emitter = None
 
@@ -1146,12 +1262,116 @@ class Pipe:
         # Update state
         self._redis_enabled = False
 
+    def _init_minimal_for_tests(self) -> None:
+        self.type = "manifold"
+        self.logger = logging.getLogger("openrouter_pipe_test")
+        self._http_session = None
+        self._initialized = False
+        self._closed = False
+        self._shutdown_lock = None
+        self._request_queue = None
+        self._queue_worker_task = None
+        self._queue_worker_lock = None
+        self._log_queue = None
+        self._log_queue_loop = None
+        self._log_worker_task = None
+        self._log_worker_lock = None
+        self._log_worker_start_task = None
+        self._cleanup_task = None
+        self._startup_task = None
+        self._startup_checks_started = False
+        self._startup_checks_pending = False
+        self._startup_checks_complete = False
+        self._warmup_failed = False
+        self._redis_url = None
+        self._websocket_manager = None
+        self._websocket_redis_url = None
+        self._redis_candidate = False
+        self._redis_enabled = False
+        self._redis_client = None
+        self._redis_listener_task = None
+        self._redis_flush_task = None
+        self._redis_ready_task = None
+        self._video_active_tasks: dict[tuple[str, str], asyncio.Task] = {}
+
+    def _attach_to_lifecycle_registry(self) -> None:
+        registry = _get_lifecycle_registry()
+        try:
+            predecessor = registry.swap_in(self)
+        except Exception:
+            self.logger.warning("hot-reload: lifecycle registry swap_in failed", exc_info=True)
+            return
+        if predecessor is None:
+            return
+        self.logger.info(
+            "hot-reload: sent close to predecessor (id=%s, predecessor_active_calls=%d)",
+            getattr(predecessor, "id", "?"),
+            getattr(predecessor, "_active_pipes_calls", -1),
+        )
+        try:
+            predecessor.close_when_idle()
+        except Exception:
+            self.logger.warning("hot-reload: predecessor close_when_idle failed", exc_info=True)
+
+    def _schedule_close(self) -> None:
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        target = running or getattr(self, "_log_queue_loop", None)
+        if target is None:
+            if hasattr(self, "logger"):
+                self.logger.debug("Close scheduling skipped: no loop available")
+            return
+        try:
+            if target.is_closed():
+                if hasattr(self, "logger"):
+                    self.logger.debug("Close scheduling skipped: loop already closed")
+                return
+        except Exception:
+            return
+        if target is running:
+            try:
+                task = target.create_task(self.close(), name="openrouter-pipe-drain-close")
+                task.add_done_callback(_consume_background_task_exception)
+            except RuntimeError:
+                if hasattr(self, "logger"):
+                    self.logger.debug("create_task close scheduling failed", exc_info=True)
+        else:
+            try:
+                asyncio.run_coroutine_threadsafe(self.close(), target)
+            except Exception:
+                if hasattr(self, "logger"):
+                    self.logger.debug("run_coroutine_threadsafe close scheduling failed", exc_info=True)
+
+    def close_when_idle(self) -> None:
+        if self._closing or self._draining:
+            return
+        print(
+            f"[openrouter pid={os.getpid()} id={getattr(self, 'id', '?')}] "
+            f"hot-reload: close received (active_calls={self._active_pipes_calls})",
+            file=sys.stderr,
+            flush=True,
+        )
+        self._draining = True
+        if self._active_pipes_calls <= 0:
+            self._schedule_close()
+
+    def _maybe_trigger_drain_close(self) -> None:
+        if not self._draining or self._closing:
+            return
+        if self._active_pipes_calls > 0:
+            return
+        self._schedule_close()
+
     @timed
     def shutdown(self) -> None:
-        """Public method to shut down background resources."""
-        if self._artifact_store:
-            self._artifact_store.close()
-        self._session_log_manager.stop_workers()
+        artifact_store = getattr(self, "_artifact_store", None)
+        if artifact_store:
+            artifact_store.close()
+        session_log_manager = getattr(self, "_session_log_manager", None)
+        if session_log_manager:
+            session_log_manager.stop_workers()
 
     @timed
     async def _stop_request_worker(self) -> None:
@@ -1179,6 +1399,8 @@ class Pipe:
     @timed
     async def _stop_log_worker(self) -> None:
         """Stop this instance's log worker and clear the queue."""
+        owned_queue = self._log_queue
+        owned_loop = self._log_queue_loop
         worker = self._log_worker_task
         if worker:
             worker.cancel()
@@ -1202,10 +1424,12 @@ class Pipe:
             self._log_worker_task = None
         self._log_queue = None
         self._log_queue_loop = None
-        # Import SessionLogger lazily to avoid circular dependency
         try:
             from .core.logging_system import SessionLogger
-            SessionLogger.set_log_queue(None)
+            if owned_queue is not None and SessionLogger.log_queue is owned_queue:
+                SessionLogger.set_log_queue(None)
+            if owned_loop is not None and getattr(SessionLogger, "_main_loop", None) is owned_loop:
+                SessionLogger.set_main_loop(None)
         except Exception:
             pass
 
@@ -1223,25 +1447,93 @@ class Pipe:
     @timed
     async def close(self):
         """Shutdown background resources (DB executor, queue worker, log worker, Redis)."""
-        if getattr(self, "_closed", False):
+        lock = getattr(self, "_close_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._close_lock = lock
+        with lock:
+            already_closing = getattr(self, "_closing", False)
+            if already_closing:
+                existing = getattr(self, "_close_done", None)
+            else:
+                self._closing = True
+                self._closed = True
+                self._close_done = concurrent.futures.Future()
+                existing = None
+        if already_closing:
+            if existing is not None and not existing.done():
+                with contextlib.suppress(Exception):
+                    await asyncio.wrap_future(existing)
             return
-        self._closed = True
-        self.shutdown()
+        print(
+            f"[openrouter pid={os.getpid()} id={getattr(self, 'id', '?')}] "
+            f"hot-reload: closing",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            await self._do_close()
+        finally:
+            done = self._close_done
+            if done is not None and not done.done():
+                with contextlib.suppress(Exception):
+                    done.set_result(None)
+
+    async def _do_close(self) -> None:
+        extra_tasks: list[asyncio.Task] = []
+        startup = getattr(self, "_startup_task", None)
+        if startup and not startup.done():
+            startup.cancel()
+            extra_tasks.append(startup)
+        self._startup_task = None
+
+        log_start = getattr(self, "_log_worker_start_task", None)
+        if log_start and not log_start.done():
+            log_start.cancel()
+            extra_tasks.append(log_start)
+        self._log_worker_start_task = None
+
+        catalog = getattr(self, "_catalog_manager", None)
+        catalog_sync = getattr(catalog, "_model_metadata_sync_task", None) if catalog else None
+        if catalog_sync and not catalog_sync.done():
+            catalog_sync.cancel()
+            extra_tasks.append(catalog_sync)
+        if catalog is not None:
+            with contextlib.suppress(Exception):
+                catalog._model_metadata_sync_task = None
+
+        if extra_tasks:
+            with contextlib.suppress(Exception):
+                await asyncio.gather(*extra_tasks, return_exceptions=True)
+
+        if getattr(self, "_session_log_manager", None) or getattr(self, "_artifact_store", None):
+            self.shutdown()
         await self._stop_video_tasks()
         await self._stop_request_worker()
         await self._stop_log_worker()
         await self._stop_redis()
+
         if self._http_session:
             with contextlib.suppress(Exception):
                 await self._http_session.close()
             self._http_session = None
             if self._multimodal_handler:
                 self._multimodal_handler.set_http_session(None)
+
         if self._cleanup_task:
             self._cleanup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._cleanup_task
             self._cleanup_task = None
+
+        catalog_mgr = getattr(self, "_catalog_manager", None)
+        if catalog_mgr is not None:
+            with contextlib.suppress(Exception):
+                catalog_mgr._pipe = None  # type: ignore[assignment]
+        slm = getattr(self, "_session_log_manager", None)
+        if slm is not None:
+            with contextlib.suppress(Exception):
+                slm._pipe = None  # type: ignore[assignment]
 
     @timed
     def __del__(self) -> None:
@@ -1249,27 +1541,7 @@ class Pipe:
         if getattr(self, "_closed", False):
             return
         self.shutdown()
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        coro = self.close()
-        if loop and loop.is_running():
-            try:
-                task = loop.create_task(coro, name="openrouter-pipe-close")
-                task.add_done_callback(_consume_background_task_exception)
-            except RuntimeError:
-                coro.close()
-        else:
-            try:
-                new_loop = asyncio.new_event_loop()
-                try:
-                    new_loop.run_until_complete(coro)
-                finally:
-                    new_loop.close()
-            except RuntimeError:
-                coro.close()
+        self._schedule_close()
 
     # =============================================================================
     # UTILITY METHODS

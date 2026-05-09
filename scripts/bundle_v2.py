@@ -880,14 +880,12 @@ class _PackageProxy(types.ModuleType):
 def _install_package_alias() -> None:
     _this = sys.modules[__name__]
     _pkg = "{PACKAGE_NAME}"
-    if _pkg not in sys.modules:
-        sys.modules[_pkg] = _this
+    sys.modules[_pkg] = _this
 
     # Register submodule entries in sys.modules
     for _sub in [{sub_list}]:
         _full = f"{{_pkg}}.{{_sub}}"
-        if _full not in sys.modules:
-            sys.modules[_full] = _this
+        sys.modules[_full] = _this
 
     # For intermediate package names that shadow existing globals (e.g., our
     # "logging" subpackage vs stdlib "logging"), create proxy modules so that
@@ -1165,9 +1163,13 @@ def _generate_compressed_runtime() -> str:
     lines.append("        exec(code, module.__dict__)")
     lines.append("")
     lines.append("def _install_bundled_finder() -> None:")
-    lines.append("    for finder in sys.meta_path:")
-    lines.append("        if isinstance(finder, _BundledModuleFinder):")
-    lines.append("            return")
+    lines.append("    sys.meta_path[:] = [")
+    lines.append("        _f for _f in sys.meta_path")
+    lines.append("        if type(_f).__name__ != '_BundledModuleFinder'")
+    lines.append("    ]")
+    lines.append("    for _key in list(sys.modules):")
+    lines.append("        if _key == 'open_webui_openrouter_pipe' or _key.startswith('open_webui_openrouter_pipe.'):")
+    lines.append("            del sys.modules[_key]")
     lines.append("    sys.meta_path.insert(0, _BundledModuleFinder())")
     lines.append("")
     lines.append("_install_bundled_finder()")
