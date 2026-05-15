@@ -41,6 +41,13 @@ PACKAGE_NAME = "open_webui_openrouter_pipe"
 
 DEFAULT_OUTPUT_RAW = PROJECT_ROOT / "open_webui_openrouter_pipe_bundled.py"
 DEFAULT_OUTPUT_COMPRESSED = PROJECT_ROOT / "open_webui_openrouter_pipe_bundled_compressed.py"
+ANYIO_WORKAROUND_FILE = PROJECT_ROOT / "scripts" / "anyio_1111_workaround.py"
+
+
+def _load_anyio_workaround_block() -> str:
+    if not ANYIO_WORKAROUND_FILE.exists():
+        return ""
+    return ANYIO_WORKAROUND_FILE.read_text(encoding="utf-8").rstrip()
 
 # Modules known to be stdlib (Python 3.11+).  We use sys.stdlib_module_names
 # at runtime, but keep a fallback for safety.
@@ -946,6 +953,12 @@ def assemble(
     parts.append(f'__version__ = "{version}"')
     parts.append("")
 
+    # 2b. anyio #1111 workaround (must run BEFORE any third-party import touches anyio)
+    workaround = _load_anyio_workaround_block()
+    if workaround:
+        parts.append(workaround)
+        parts.append("")
+
     # 3. Stdlib imports
     if stdlib_imports:
         parts.append("# =============================================================================")
@@ -1207,6 +1220,13 @@ def _bundle_compressed(*, output_path: Path, version: str) -> None:
     parts.append(_render_header_compressed(version=version))
     parts.append("")
     parts.append(_generate_compressed_runtime())
+
+    # anyio #1111 workaround - runs AFTER the import hook is installed (so anyio
+    # imports work) and BEFORE the entry point pulls in our package modules.
+    workaround = _load_anyio_workaround_block()
+    if workaround:
+        parts.append(workaround)
+        parts.append("")
 
     parts.append("# =============================================================================")
     parts.append("# BUNDLED MODULE SOURCES")
