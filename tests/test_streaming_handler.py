@@ -5924,6 +5924,14 @@ class TestStreamingCoreAdditionalCoverage:
         pipe = pipe_instance_async
         body = ResponsesBody(model="test/model", input=[], stream=True)
 
+        async def _fake_download(self, url):
+            return None
+
+        monkeypatch.setattr(
+            "open_webui_openrouter_pipe.storage.multimodal.MultimodalHandler._download_remote_url",
+            _fake_download,
+        )
+
         events = [
             {
                 "type": "response.output_item.done",

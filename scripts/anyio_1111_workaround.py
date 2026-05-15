@@ -34,12 +34,17 @@
 # =============================================================================
 def _apply_anyio_1111_workaround() -> None:
     import logging as _logging
+    import sys as _sys
     from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
     _log = _logging.getLogger("open_webui_openrouter_pipe.anyio_1111_workaround")
 
     _KNOWN_BUGGY = {"4.12.1", "4.13.0"}
     _MARKER = "_anyio_1111_workaround_applied"
+
+    if "pytest" in _sys.modules or "_pytest" in _sys.modules:
+        _log.debug("anyio #1111 workaround skipped: running under pytest")
+        return
 
     try:
         ver = _pkg_version("anyio")
