@@ -17,13 +17,14 @@
 #
 # How this block works: at bundle exec time, before any of our pipe code runs,
 # we install a wrapper around CancelScope._deliver_cancellation. The wrapper
-# pre-filters self._tasks to drop completed tasks before delegating to the
-# original method - functionally equivalent to the upstream fix without
-# needing to replicate the full method body per anyio version. Python's
-# attribute lookup means any existing CancelScope (including those already
-# created by OWUI startup) picks up the patched method on its next
-# _deliver_cancellation invocation, so already-spinning scopes recover
-# within one tick.
+# delegates to the original method, then checks: if all remaining tasks in the
+# scope are done AND the original just scheduled another _deliver_cancellation
+# iteration via call_soon, cancel that reschedule. This breaks the spin loop
+# without mutating self._tasks (mutating it would trip anyio's task_done
+# bookkeeping, which expects done tasks to remain in _tasks until task_done
+# removes them itself). Python's attribute lookup means any existing
+# CancelScope picks up the patched method on its next invocation, so
+# already-spinning scopes recover within one tick.
 #
 # Version gating: only activates on known-buggy anyio versions. Any other
 # version stands down with a WARNING reminding you to remove this block.
@@ -81,15 +82,17 @@ def _apply_anyio_1111_workaround() -> None:
         return
 
     def _patched_deliver_cancellation(self, origin):
+        result = original(self, origin)
         try:
             tasks = self._tasks
-            if tasks:
-                done_tasks = [t for t in tasks if t.done()]
-                for t in done_tasks:
-                    tasks.discard(t)
+            if tasks and all(t.done() for t in tasks):
+                handle = getattr(self, "_cancel_handle", None)
+                if handle is not None:
+                    handle.cancel()
+                    self._cancel_handle = None
         except Exception:
             pass
-        return original(self, origin)
+        return result
 
     _patched_deliver_cancellation._anyio_1111_workaround_applied = True  # type: ignore[attr-defined]
     CancelScope._deliver_cancellation = _patched_deliver_cancellation  # type: ignore[method-assign]
