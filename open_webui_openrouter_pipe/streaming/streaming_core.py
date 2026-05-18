@@ -55,6 +55,7 @@ from ..core.timing_logger import timed, timing_mark
 from .constants import ReasoningStatusThrottle
 
 # Imports from storage.persistence
+from ..storage.multimodal import _guess_image_mime_type
 from ..storage.persistence import normalize_persisted_item
 # Imports from core.utils
 from ..core.utils import (
@@ -529,7 +530,7 @@ class StreamingHandler:
                 return None
             ext = "png"
             if isinstance(mime_type, str) and "/" in mime_type:
-                ext = mime_type.split("/")[-1] or "png"
+                ext = (mime_type.split("/")[-1] or "png").split("+")[0]
             if ext == "jpg":
                 ext = "jpeg"
             filename = f"generated-image-{uuid.uuid4().hex}.{ext}"
@@ -580,7 +581,7 @@ class StreamingHandler:
                 decoded = base64.b64decode(cleaned, validate=True)
             except (binascii.Error, ValueError):
                 return None
-            mime_type = "image/png"
+            mime_type = _guess_image_mime_type("", None, decoded) or "image/png"
             stored = await _persist_generated_image(decoded, mime_type)
             if stored:
                 await self._pipe._event_emitter_handler._emit_status(event_emitter, StatusMessages.IMAGE_BASE64_SAVED, done=False)
@@ -612,12 +613,15 @@ class StreamingHandler:
                             decoded = base64.b64decode(cleaned, validate=True)
                         except (binascii.Error, ValueError):
                             continue
-                        mime_type = (
+                        explicit_mime = (
                             entry.get("mime_type")
                             or entry.get("mimeType")
                             or entry.get("content_type")
+                        )
+                        mime_type = (
+                            _guess_image_mime_type("", explicit_mime, decoded)
                             or "image/png"
-                        ).lower()
+                        )
                         if mime_type == "image/jpg":
                             mime_type = "image/jpeg"
                         stored = await _persist_generated_image(decoded, mime_type)

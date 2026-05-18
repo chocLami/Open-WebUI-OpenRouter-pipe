@@ -403,6 +403,206 @@ _IMAGE_PER_MODEL_HELP_DATA: dict[str, dict[str, Any]] = {
             "Background RGB color (JSON array)": "Single [r,g,b] array (each 0-255).",
         },
     },
+    "recraft/recraft-v4-pro-vector": {
+        "display_name": "Recraft: Recraft V4 Pro Vector",
+        "best_known_for": (
+            "Vector (SVG) variant of V4 Pro — produces resolution-independent "
+            "SVG markup instead of raster pixels. Same design taste as V4 Pro, "
+            "scaled to ~2K equivalent detail. Best for logos, icons, infographics, "
+            "and any asset that needs to be scaled or edited downstream in vector "
+            "tools (Illustrator, Figma, Inkscape). Output is true `<svg>` markup "
+            "embedded in a `data:image/svg+xml;base64,...` URL."
+        ),
+        "tips_and_pitfalls": [
+            "Output is SVG, not PNG/JPEG — scales infinitely without quality loss.",
+            "Prefer simple, graphic prompts (logos, icons, flat illustrations) over photoreal subjects; SVG cannot represent photographic detail.",
+            "`rgb_colors` and `background_rgb_color` are sent through, but how the vector model honors them is not documented — verify visually if you rely on them.",
+            "`strength` for image-to-image works but the input is rasterised internally; SVG comes from the model, not from the input.",
+            "OpenRouter returns the SVG inline as base64; OWUI renders it natively in the chat — no rasterisation on our side.",
+            "Same human-subject limitations as V4 Pro.",
+        ],
+        "knob_descriptions": {
+            "Image aspect ratio": "Frame shape (10 standard ratios). Empty = model default.",
+            "Image size": "Resolution tier (1K/2K/4K). Empty = model default. Vector output scales freely, but the model still picks an internal canvas.",
+            "Strength (image-to-image)": "0.0-1.0; 0.0 = skip / use model default (0.5).",
+            "RGB color palette (JSON array)": "JSON array of [r,g,b] arrays (each 0-255). Effect on vector output is undocumented.",
+            "Background RGB color (JSON array)": "Single [r,g,b] array (each 0-255). Effect on vector output is undocumented.",
+        },
+    },
+    "recraft/recraft-v4-vector": {
+        "display_name": "Recraft: Recraft V4 Vector",
+        "best_known_for": (
+            "Vector (SVG) variant of V4 — same design taste at ~1K equivalent "
+            "detail, output as scalable SVG markup. Best for logos, icons, flat "
+            "illustrations, and any asset destined for vector editing or "
+            "infinite scaling. Faster and cheaper than V4 Pro Vector for "
+            "iteration; reserve Pro Vector for finals."
+        ),
+        "tips_and_pitfalls": [
+            "Output is SVG, not PNG/JPEG — scales infinitely without quality loss.",
+            "Prefer simple, graphic prompts (logos, icons, flat illustrations) over photoreal subjects; SVG cannot represent photographic detail.",
+            "`rgb_colors` and `background_rgb_color` are sent through, but how the vector model honors them is not documented — verify visually if you rely on them.",
+            "`strength` for image-to-image works but the input is rasterised internally; SVG comes from the model.",
+            "OpenRouter returns the SVG inline as base64; OWUI renders it natively in the chat.",
+            "Use V4 Vector for iteration; V4 Pro Vector for higher-fidelity finals.",
+        ],
+        "knob_descriptions": {
+            "Image aspect ratio": "Frame shape (10 standard ratios). Empty = model default.",
+            "Image size": "Resolution tier (1K/2K/4K). Empty = model default. Vector output scales freely.",
+            "Strength (image-to-image)": "0.0-1.0; 0.0 = skip / use model default (0.5).",
+            "RGB color palette (JSON array)": "JSON array of [r,g,b] arrays (each 0-255). Effect on vector output is undocumented.",
+            "Background RGB color (JSON array)": "Single [r,g,b] array (each 0-255). Effect on vector output is undocumented.",
+        },
+    },
+    "recraft/recraft-v4.1": {
+        "display_name": "Recraft: Recraft V4.1",
+        "best_known_for": (
+            "V4.1 is Recraft's May 2026 aesthetic refresh of V4 — same 1024x1024 "
+            "raster output, same image_config surface, but tuned for stronger "
+            "composition, color cohesion, and visual polish. Best for marketing "
+            "assets, social posts, hero imagery, and any work where the V4 "
+            "output felt almost-but-not-quite-right aesthetically. Same speed "
+            "envelope as V4 (~10s/image)."
+        ),
+        "tips_and_pitfalls": [
+            "PURE-image-only.",
+            "Same image_config knobs as V4 (strength + rgb_colors + background_rgb_color); NO style or text_layout (those are V3 ONLY).",
+            "Drop-in successor to V4 — try V4.1 first; fall back to V4 if its aesthetic doesn't suit a specific brand.",
+            "Image-to-image: only one input image supported.",
+            "Same human-subject limitations as V4; not ideal for portraiture.",
+            "For general-purpose / cost-sensitive work without aesthetic emphasis, prefer the V4.1 Utility variants.",
+        ],
+        "knob_descriptions": {
+            "Image aspect ratio": "Frame shape (10 standard ratios). Empty = model default.",
+            "Image size": "Resolution tier (1K/2K/4K). Empty = model default.",
+            "Strength (image-to-image)": "0.0-1.0; 0.0 = skip / use model default (0.5).",
+            "RGB color palette (JSON array)": "JSON array of [r,g,b] arrays (each 0-255).",
+            "Background RGB color (JSON array)": "Single [r,g,b] array (each 0-255).",
+        },
+    },
+    "recraft/recraft-v4.1-pro": {
+        "display_name": "Recraft: Recraft V4.1 Pro",
+        "best_known_for": (
+            "V4.1 Pro is the high-resolution counterpart to V4.1 — same aesthetic "
+            "tuning, 2048x2048 raster output (~4 MP), ~30s/image. Built for "
+            "print-ready aesthetic work: magazine layouts, posters, billboards, "
+            "editorial illustration where V4 Pro felt close but the polish was "
+            "off. Use V4.1 for iteration, V4.1 Pro for finals."
+        ),
+        "tips_and_pitfalls": [
+            "PURE-image-only.",
+            "Same image_config knobs as V4.1 (strength + rgb_colors + background_rgb_color); NO style or text_layout (V3 ONLY).",
+            "~3x slower than V4.1 due to higher resolution — reserve for finals.",
+            "Image-to-image: only one input image supported.",
+            "Same human-subject limitations as V4.1; not ideal for portraiture.",
+        ],
+        "knob_descriptions": {
+            "Image aspect ratio": "Frame shape (10 standard ratios). Empty = model default.",
+            "Image size": "Resolution tier (1K/2K/4K). Empty = model default.",
+            "Strength (image-to-image)": "0.0-1.0; 0.0 = skip / use model default (0.5).",
+            "RGB color palette (JSON array)": "JSON array of [r,g,b] arrays (each 0-255).",
+            "Background RGB color (JSON array)": "Single [r,g,b] array (each 0-255).",
+        },
+    },
+    "recraft/recraft-v4.1-pro-vector": {
+        "display_name": "Recraft: Recraft V4.1 Pro Vector",
+        "best_known_for": (
+            "Vector (SVG) variant of V4.1 Pro — V4.1's aesthetic tuning, ~2K "
+            "equivalent detail, true `<svg>` output. Best for high-polish logos, "
+            "editorial icon sets, and brand assets that need to scale and edit "
+            "downstream. OpenRouter returns the SVG inline as a "
+            "`data:image/svg+xml;base64,...` URL; OWUI renders it natively."
+        ),
+        "tips_and_pitfalls": [
+            "Output is SVG, not PNG/JPEG — scales infinitely without quality loss.",
+            "Prefer simple, graphic prompts (logos, icons, flat illustrations) over photoreal subjects.",
+            "`rgb_colors` and `background_rgb_color` are sent through, but how the vector model honors them is not documented — verify visually if you rely on them.",
+            "`strength` for image-to-image works but the input is rasterised internally; output is SVG either way.",
+            "Use V4.1 Vector for iteration; V4.1 Pro Vector for finals.",
+            "Same aesthetic tuning advantage over V4 Pro Vector — try V4.1 Pro Vector first for vector work.",
+        ],
+        "knob_descriptions": {
+            "Image aspect ratio": "Frame shape (10 standard ratios). Empty = model default.",
+            "Image size": "Resolution tier (1K/2K/4K). Empty = model default. Vector output scales freely.",
+            "Strength (image-to-image)": "0.0-1.0; 0.0 = skip / use model default (0.5).",
+            "RGB color palette (JSON array)": "JSON array of [r,g,b] arrays (each 0-255). Effect on vector output is undocumented.",
+            "Background RGB color (JSON array)": "Single [r,g,b] array (each 0-255). Effect on vector output is undocumented.",
+        },
+    },
+    "recraft/recraft-v4.1-utility": {
+        "display_name": "Recraft: Recraft V4.1 Utility",
+        "best_known_for": (
+            "Recraft's general-purpose V4.1 variant — drops the aesthetic-tuning "
+            "bias of the regular V4.1 in exchange for broader subject coverage "
+            "and faster/cheaper generation. Best for spot illustrations, "
+            "diagrams, placeholder/stock imagery, and any work where 'on-brand "
+            "aesthetics' is not the goal. 1024x1024 raster output."
+        ),
+        "tips_and_pitfalls": [
+            "PURE-image-only.",
+            "Pick Utility over regular V4.1 when you need versatility, not aesthetic polish.",
+            "Same image_config knobs as V4.1 (strength + rgb_colors + background_rgb_color); NO style or text_layout (V3 ONLY).",
+            "Image-to-image: only one input image supported.",
+            "Same human-subject limitations as V4.1.",
+            "Use Utility for fast/cheap work; switch to regular V4.1 (aesthetic) or V4.1 Pro (print) when output quality matters.",
+        ],
+        "knob_descriptions": {
+            "Image aspect ratio": "Frame shape (10 standard ratios). Empty = model default.",
+            "Image size": "Resolution tier (1K/2K/4K). Empty = model default.",
+            "Strength (image-to-image)": "0.0-1.0; 0.0 = skip / use model default (0.5).",
+            "RGB color palette (JSON array)": "JSON array of [r,g,b] arrays (each 0-255).",
+            "Background RGB color (JSON array)": "Single [r,g,b] array (each 0-255).",
+        },
+    },
+    "recraft/recraft-v4.1-utility-pro": {
+        "display_name": "Recraft: Recraft V4.1 Utility Pro",
+        "best_known_for": (
+            "High-resolution counterpart to V4.1 Utility — 2048x2048 (~4 MP) "
+            "general-purpose raster output. Same versatility / non-aesthetic "
+            "bias as the base Utility variant, with 2x the resolution for "
+            "larger placements. Use for general-purpose finals where aesthetic "
+            "polish is not the goal."
+        ),
+        "tips_and_pitfalls": [
+            "PURE-image-only.",
+            "Same image_config knobs as V4.1 Utility (strength + rgb_colors + background_rgb_color); NO style or text_layout (V3 ONLY).",
+            "~3x slower than V4.1 Utility due to higher resolution — reserve for finals.",
+            "Image-to-image: only one input image supported.",
+            "Same human-subject limitations as V4.1.",
+            "Use Utility Pro when you need higher resolution but not aesthetic tuning; otherwise prefer V4.1 Pro.",
+        ],
+        "knob_descriptions": {
+            "Image aspect ratio": "Frame shape (10 standard ratios). Empty = model default.",
+            "Image size": "Resolution tier (1K/2K/4K). Empty = model default.",
+            "Strength (image-to-image)": "0.0-1.0; 0.0 = skip / use model default (0.5).",
+            "RGB color palette (JSON array)": "JSON array of [r,g,b] arrays (each 0-255).",
+            "Background RGB color (JSON array)": "Single [r,g,b] array (each 0-255).",
+        },
+    },
+    "recraft/recraft-v4.1-vector": {
+        "display_name": "Recraft: Recraft V4.1 Vector",
+        "best_known_for": (
+            "Vector (SVG) variant of V4.1 — V4.1's aesthetic tuning, ~1K "
+            "equivalent detail, true `<svg>` output. Best for aesthetic-driven "
+            "logos, icon sets, and flat illustrations destined for vector "
+            "editing. Faster/cheaper than V4.1 Pro Vector for iteration."
+        ),
+        "tips_and_pitfalls": [
+            "Output is SVG, not PNG/JPEG — scales infinitely without quality loss.",
+            "Prefer simple, graphic prompts (logos, icons, flat illustrations) over photoreal subjects.",
+            "`rgb_colors` and `background_rgb_color` are sent through, but how the vector model honors them is not documented — verify visually if you rely on them.",
+            "`strength` for image-to-image works but the input is rasterised internally; output is SVG either way.",
+            "OpenRouter returns the SVG inline as base64; OWUI renders it natively.",
+            "Use V4.1 Vector for iteration; V4.1 Pro Vector for higher-fidelity finals.",
+        ],
+        "knob_descriptions": {
+            "Image aspect ratio": "Frame shape (10 standard ratios). Empty = model default.",
+            "Image size": "Resolution tier (1K/2K/4K). Empty = model default. Vector output scales freely.",
+            "Strength (image-to-image)": "0.0-1.0; 0.0 = skip / use model default (0.5).",
+            "RGB color palette (JSON array)": "JSON array of [r,g,b] arrays (each 0-255). Effect on vector output is undocumented.",
+            "Background RGB color (JSON array)": "Single [r,g,b] array (each 0-255). Effect on vector output is undocumented.",
+        },
+    },
 }
 
 # Public re-export name (mirror of VIDEO_HELP_BY_MODEL convention).
