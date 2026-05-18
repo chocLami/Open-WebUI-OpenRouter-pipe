@@ -1876,10 +1876,11 @@ class Pipe:
                                 status = "error"
                                 reason = str(exc)
 
+                    from .logging.session_log_manager import resolve_message_id
                     resolved_user_id = str(job.user_id or job.user.get("id") or job.metadata.get("user_id") or "")
                     resolved_session_id = str(job.session_id or job.metadata.get("session_id") or "")
                     resolved_chat_id = str(job.metadata.get("chat_id") or "")
-                    resolved_message_id = str(job.metadata.get("message_id") or "")
+                    resolved_message_id = resolve_message_id(job.metadata)
                     try:
                         await asyncio.shield(
                             self._session_log_manager.persist_segment_to_db(

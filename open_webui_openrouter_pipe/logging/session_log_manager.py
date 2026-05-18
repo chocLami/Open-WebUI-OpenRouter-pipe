@@ -27,6 +27,49 @@ from typing import Any, TYPE_CHECKING
 from ..core.timing_logger import timed
 from ..storage.persistence import _db_session
 
+
+def resolve_message_id(metadata: Any) -> str:
+    try:
+        if not isinstance(metadata, dict):
+            return ""
+        try:
+            mid = metadata.get("message_id")
+            if mid:
+                return str(mid)
+        except Exception:
+            pass
+        try:
+            if not metadata.get("task"):
+                return ""
+        except Exception:
+            return ""
+        try:
+            task_body = metadata.get("task_body") or {}
+            if isinstance(task_body, dict):
+                messages = task_body.get("messages")
+                if isinstance(messages, list) and messages:
+                    last = messages[-1]
+                    if isinstance(last, dict):
+                        candidate = last.get("id")
+                        if candidate:
+                            return str(candidate)
+        except Exception:
+            pass
+        try:
+            user_message = metadata.get("user_message") or {}
+            if isinstance(user_message, dict):
+                children = user_message.get("childrenIds")
+                if isinstance(children, list) and children:
+                    candidate = children[0]
+                    if candidate:
+                        return str(candidate)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return ""
+
+
 # Optional pyzipper support for session log encryption
 try:
     import pyzipper  # pyright: ignore[reportMissingImports]

@@ -2612,7 +2612,8 @@ class StreamingHandler:
                 resolved_user_id = str(user_id or metadata.get("user_id") or "")
                 resolved_session_id = str(metadata.get("session_id") or "")
                 resolved_chat_id = str(metadata.get("chat_id") or "")
-                resolved_message_id = str(metadata.get("message_id") or "")
+                from ..logging.session_log_manager import resolve_message_id
+                resolved_message_id = resolve_message_id(metadata)
                 segment_status = "complete"
                 if was_cancelled:
                     segment_status = "cancelled"
