@@ -30,6 +30,20 @@ if TYPE_CHECKING:
     from ...pipe import Pipe
 
 
+def _should_retry_stream(emitted_any: bool, exc: Optional[BaseException]) -> bool:
+    """Decide whether a streaming attempt may be retried.
+
+    Retry is only safe BEFORE any event has reached the consumer. Once output
+    has been emitted, a retry re-POSTs and re-streams the whole response with
+    fresh (higher) sequence numbers, duplicating content the user already saw —
+    so never retry after the first emitted event. Pre-output network failures
+    (no event delivered yet) are still safely retried.
+    """
+    if emitted_any:
+        return False
+    return isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError))
+
+
 class ResponsesAdapter:
     """Adapter for OpenRouter /responses API endpoint."""
 
@@ -101,12 +115,22 @@ class ResponsesAdapter:
 
         @timed
         async def _producer() -> None:
+            # seq is intentionally NOT reset inside the retry loop:
+            # _should_retry_stream forbids retrying once any event was emitted,
+            # so a permitted retry always restarts with seq == 0 and consumer
+            # reordering stays contiguous.
             seq = 0
             first_chunk_received = False
+            emitted_any = False
+
+            def _retry_streaming(retry_state) -> bool:
+                exc = retry_state.outcome.exception() if retry_state.outcome else None
+                return _should_retry_stream(emitted_any, exc)
+
             retryer = AsyncRetrying(
                 stop=stop_after_attempt(3),
                 wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
-                retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)),
+                retry=_retry_streaming,
                 reraise=True,
             )
             try:
@@ -182,6 +206,7 @@ class ResponsesAdapter:
                                                     timing_mark("producer_first_event_queued")
                                                 await chunk_queue.put((seq, data_blob))
                                                 seq += 1
+                                                emitted_any = True
                                             continue
                                         if stripped.startswith(b":"):
                                             continue
@@ -199,6 +224,7 @@ class ResponsesAdapter:
                                     if data_blob and data_blob != b"[DONE]":
                                         await chunk_queue.put((seq, data_blob))
                                         seq += 1
+                                        emitted_any = True
                         except Exception as producer_exc:
                             is_auth_failure = (
                                 isinstance(producer_exc, OpenRouterAPIError)

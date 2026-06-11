@@ -25,6 +25,7 @@ from ...requests.debug import (
 from ...core.errors import (
     _build_openrouter_api_error,
 )
+from .responses_adapter import _should_retry_stream
 # Imports from api.transforms
 from ..transforms import (
     _filter_openrouter_chat_request,
@@ -164,10 +165,16 @@ class ChatCompletionsAdapter:
             current["id"] = generated
             return generated
 
+        emitted_any = False
+
+        def _retry_streaming(retry_state) -> bool:
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            return _should_retry_stream(emitted_any, exc)
+
         retryer = AsyncRetrying(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
-            retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError)),
+            retry=_retry_streaming,
             reraise=True,
         )
 
@@ -289,6 +296,10 @@ class ChatCompletionsAdapter:
                                     chunk_obj = json.loads(data_blob.decode("utf-8"))
                                 except Exception:
                                     continue
+                                # First decoded event: the yields and accumulator
+                                # updates below make a retry unsafe (it would
+                                # re-stream and duplicate delivered output).
+                                emitted_any = True
 
                                 if isinstance(chunk_obj, dict) and isinstance(chunk_obj.get("usage"), dict):
                                     latest_usage = dict(chunk_obj["usage"])

@@ -4360,3 +4360,128 @@ async def test_chat_completions_nonstreaming_inlines_internal_file_urls(monkeypa
             )
 
     await pipe.close()
+
+
+# ============================================================================
+# Mid-stream retry guard (no duplicate output after first emitted event)
+# ============================================================================
+
+
+class _ScriptedStreamSession:
+    """Minimal aiohttp.ClientSession stand-in whose POST bodies follow a
+    per-attempt script: each entry is a list of byte chunks to stream and/or
+    an exception instance to raise mid-stream."""
+
+    def __init__(self, scripts: list[list[Any]]):
+        self._scripts = scripts
+        self.calls = 0
+
+    def post(self, url: str, json: Any = None, headers: Any = None):
+        script = self._scripts[min(self.calls, len(self._scripts) - 1)]
+        self.calls += 1
+        return _ScriptedResponseCM(script)
+
+
+class _ScriptedResponseCM:
+    def __init__(self, script: list[Any]):
+        self._script = script
+
+    async def __aenter__(self):
+        return _ScriptedResponse(self._script)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _ScriptedResponse:
+    status = 200
+    reason = "OK"
+    headers: dict[str, str] = {}
+
+    def __init__(self, script: list[Any]):
+        self._script = script
+
+    @property
+    def content(self):
+        return self
+
+    async def iter_any(self):
+        for item in self._script:
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_streaming_no_retry_after_emit(pipe_instance_async):
+    """Once any event has been decoded and yielded, a mid-stream network error
+    must NOT trigger a retry: retrying re-POSTs and re-streams from scratch,
+    duplicating content the user already saw (and double-feeding the
+    reasoning/text accumulators that build response.completed)."""
+    import aiohttp as _aiohttp
+
+    pipe = pipe_instance_async
+    valves = pipe.valves
+    first_attempt = [
+        _sse({"choices": [{"delta": {"content": "Hello"}, "finish_reason": None}]}).encode("utf-8"),
+        _aiohttp.ClientPayloadError("connection lost mid-stream"),
+    ]
+    clean_retry = [
+        (
+            _sse({"choices": [{"delta": {"content": "Hello"}, "finish_reason": None}]})
+            + _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+            + "data: [DONE]\n\n"
+        ).encode("utf-8"),
+    ]
+    session = _ScriptedStreamSession([first_attempt, clean_retry])
+
+    events = []
+    with pytest.raises(_aiohttp.ClientPayloadError):
+        async for event in pipe.send_openai_chat_completions_streaming_request(
+            session,
+            {"model": "openai/gpt-4o", "stream": True, "input": []},
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            valves=valves,
+        ):
+            events.append(event)
+
+    deltas = [e for e in events if e.get("type") == "response.output_text.delta"]
+    assert [d["delta"] for d in deltas] == ["Hello"], "delivered delta must appear exactly once"
+    assert session.calls == 1, "no re-POST after output was emitted"
+
+    await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_streaming_retries_before_first_emit(pipe_instance_async):
+    """Network failures BEFORE any event is decoded are still retried."""
+    import aiohttp as _aiohttp
+
+    pipe = pipe_instance_async
+    valves = pipe.valves
+    failing_attempt = [_aiohttp.ClientConnectionError("connection refused")]
+    clean_retry = [
+        (
+            _sse({"choices": [{"delta": {"content": "Hi"}, "finish_reason": None}]})
+            + _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+            + "data: [DONE]\n\n"
+        ).encode("utf-8"),
+    ]
+    session = _ScriptedStreamSession([failing_attempt, clean_retry])
+
+    events = []
+    async for event in pipe.send_openai_chat_completions_streaming_request(
+        session,
+        {"model": "openai/gpt-4o", "stream": True, "input": []},
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        valves=valves,
+    ):
+        events.append(event)
+
+    deltas = [e for e in events if e.get("type") == "response.output_text.delta"]
+    assert [d["delta"] for d in deltas] == ["Hi"]
+    assert session.calls == 2, "pre-output failure must be retried"
+
+    await pipe.close()

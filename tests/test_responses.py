@@ -2376,3 +2376,26 @@ async def test_streaming_consecutive_malformed_at_start(pipe_instance_async):
     assert len(text_deltas) >= 1
     assert "Finally" in "".join(e["delta"] for e in text_deltas)
     assert any(e.get("type") == "response.completed" for e in events)
+
+
+def test_should_retry_stream_no_retry_after_emit():
+    """Streaming retry is only safe before any event reaches the consumer.
+    Once output is emitted, retrying re-streams from scratch with fresh seq
+    numbers and duplicates delivered content (regression guard)."""
+    import asyncio as _asyncio
+    import aiohttp as _aiohttp
+    from open_webui_openrouter_pipe.api.gateway.responses_adapter import _should_retry_stream
+
+    # Before any output: retry on network errors.
+    assert _should_retry_stream(False, _aiohttp.ClientConnectionError()) is True
+    assert _should_retry_stream(False, _aiohttp.ClientPayloadError()) is True
+    assert _should_retry_stream(False, _asyncio.TimeoutError()) is True
+
+    # After output emitted: never retry (would duplicate).
+    assert _should_retry_stream(True, _aiohttp.ClientConnectionError()) is False
+    assert _should_retry_stream(True, _aiohttp.ClientPayloadError()) is False
+    assert _should_retry_stream(True, _asyncio.TimeoutError()) is False
+
+    # Non-network errors are never retried, regardless of emit state.
+    assert _should_retry_stream(False, ValueError("x")) is False
+    assert _should_retry_stream(False, None) is False
