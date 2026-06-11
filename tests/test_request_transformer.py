@@ -970,6 +970,38 @@ class TestAudioHandling:
         assert audio_block["input_audio"]["format"] == "mp3"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("fmt", ["flac", "m4a", "ogg", "aiff", "aac", "pcm16", "pcm24", "webm"])
+    async def test_audio_block_preserves_non_mp3_formats(self, pipe_instance, sample_audio_base64, fmt):
+        """Formats OpenRouter's /chat/completions accepts (flac/m4a/ogg/...) must be
+        preserved, not silently coerced to 'mp3'. The orchestrator routes these here
+        precisely because they are supported."""
+        messages = [
+            {"role": "user", "content": [
+                {"type": "input_audio", "input_audio": {"data": sample_audio_base64, "format": fmt}}
+            ]}
+        ]
+        result = await transform_messages_to_input(pipe_instance, messages)
+        audio_block = result[0]["content"][0]
+        assert audio_block["input_audio"]["format"] == fmt
+
+    @pytest.mark.asyncio
+    async def test_audio_block_webm_mime_hint_maps_to_webm(self, pipe_instance, sample_audio_base64):
+        """A block carrying only an audio/webm mime hint (no explicit format)
+        must map to 'webm', not fall through to the 'mp3' default."""
+        messages = [
+            {"role": "user", "content": [
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": sample_audio_base64},
+                    "mimeType": "audio/webm",
+                }
+            ]}
+        ]
+        result = await transform_messages_to_input(pipe_instance, messages)
+        audio_block = result[0]["content"][0]
+        assert audio_block["input_audio"]["format"] == "webm"
+
+    @pytest.mark.asyncio
     async def test_audio_block_with_string_data(self, pipe_instance, sample_audio_base64):
         """Audio block with string data is handled."""
         messages = [
@@ -2692,17 +2724,20 @@ class TestAudioProcessingEdgeCases:
 
     @pytest.mark.asyncio
     async def test_audio_unsupported_format_defaults_to_mp3(self, pipe_instance, sample_audio_base64):
-        """Unknown audio format defaults to mp3."""
+        """A format OpenRouter does not accept (e.g. wma) defaults to mp3.
+
+        (ogg/flac/m4a/etc. ARE accepted and are preserved — see
+        test_audio_block_preserves_non_mp3_formats.)"""
         messages = [
             {"role": "user", "content": [
-                {"type": "input_audio", "input_audio": {"data": sample_audio_base64, "format": "ogg"}}
+                {"type": "input_audio", "input_audio": {"data": sample_audio_base64, "format": "wma"}}
             ]}
         ]
 
         result = await transform_messages_to_input(pipe_instance, messages)
 
         audio_block = result[0]["content"][0]
-        # ogg is not in supported formats, defaults to mp3
+        # wma is not an OpenRouter-accepted input_audio format -> defaults to mp3
         assert audio_block["input_audio"]["format"] == "mp3"
 
 

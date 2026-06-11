@@ -864,6 +864,11 @@ async def transform_messages_to_input(
                 MIME Type to Format Mapping:
                     - audio/mpeg, audio/mp3 -> "mp3"
                     - audio/wav, audio/wave, audio/x-wav -> "wav"
+                    - audio/flac, audio/x-flac -> "flac"
+                    - audio/mp4, audio/m4a, audio/x-m4a -> "m4a"
+                    - audio/ogg -> "ogg"; audio/aiff, audio/x-aiff -> "aiff"; audio/aac -> "aac"
+                    - An explicit format already in the supported set (mp3, wav,
+                      flac, m4a, ogg, aiff, aac, pcm16, pcm24) is preserved as-is.
                     - Unknown types default to "mp3"
 
                 Note:
@@ -876,8 +881,28 @@ async def transform_messages_to_input(
                     "audio/wav": "wav",
                     "audio/wave": "wav",
                     "audio/x-wav": "wav",
+                    "audio/flac": "flac",
+                    "audio/x-flac": "flac",
+                    "audio/mp4": "m4a",
+                    "audio/m4a": "m4a",
+                    "audio/x-m4a": "m4a",
+                    "audio/ogg": "ogg",
+                    "audio/aiff": "aiff",
+                    "audio/x-aiff": "aiff",
+                    "audio/aac": "aac",
+                    "audio/webm": "webm",
+                    "audio/x-webm": "webm",
                 }
-                supported_formats = {"mp3", "wav"}
+                # Formats OpenRouter's /chat/completions input_audio.format accepts
+                # (the schema is an open string; support varies by provider).
+                # The orchestrator sniffs and forces non-mp3/wav uploads (flac, m4a,
+                # ogg, webm) to this endpoint precisely because it supports them, so
+                # a correctly-detected explicit format must be preserved here rather
+                # than coerced back to "mp3".
+                supported_formats = {
+                    "mp3", "wav", "flac", "m4a", "ogg", "aiff", "aac", "pcm16", "pcm24",
+                    "webm",
+                }
 
                 def _map_format(mime: Optional[str]) -> str:
                     if not isinstance(mime, str):
