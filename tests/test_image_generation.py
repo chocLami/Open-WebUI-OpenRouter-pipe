@@ -990,6 +990,43 @@ def test_sourceful_v25_filter_inlet_validates_background_hex():
     assert out_body["image_config"] == {"background_mode": "transparent"}
 
 
+@pytest.mark.parametrize("render_fn,slug,valves,expected_key", [
+    (render_gemini_image_filter_source, "google/gemini-3.1-flash-image-preview",
+     {"IMAGE_ASPECT_RATIO_EXTENDED": "4:1"}, "aspect_ratio"),
+    (render_sourceful_image_filter_source, "sourceful/riverflow-v2-pro",
+     {"IMAGE_FONT_INPUTS_JSON": '[{"font_url": "https://x/f.ttf", "text": "Hi"}]'}, "font_inputs"),
+    (render_sourceful_v25_image_filter_source, "sourceful/riverflow-v2.5-pro",
+     {"IMAGE_SCORING_PROMPT": "crisp logo"}, "scoring_prompt"),
+    (render_recraft_common_image_filter_source, "recraft/recraft-v4",
+     {"IMAGE_STRENGTH": 0.5}, "strength"),
+    (render_recraft_v3_image_filter_source, "recraft/recraft-v3",
+     {"IMAGE_RECRAFT_STYLE": "Photorealism"}, "style"),
+    (render_grok_image_filter_source, "x-ai/grok-imagine-image-quality",
+     {"IMAGE_GROK_N": 3}, "n"),
+])
+def test_image_filter_inlet_matches_pipe_prefixed_model_id(render_fn, slug, valves, expected_key):
+    """OWUI manifold passes pipe-namespaced model ids ("<pipe_id>.<vendor>/<model>")
+    to inlet filters. The model gates must normalize that prefix or they silently
+    no-op in production. Prefixed ids must write knobs, bare ids must still work,
+    and a foreign model must still be ignored."""
+    module = _load_filter_from_source(render_fn(), f"test_prefix_{expected_key}")
+    prefix = "open_webui_openrouter_pipe."
+
+    prefixed: dict[str, Any] = {"model": prefix + slug, "messages": []}
+    module.Filter().inlet(prefixed, __metadata__={}, __user__={"valves": dict(valves)})
+    assert expected_key in (prefixed.get("image_config") or {}), (
+        f"{slug}: gate failed to match the pipe-prefixed model id"
+    )
+
+    bare: dict[str, Any] = {"model": slug, "messages": []}
+    module.Filter().inlet(bare, __metadata__={}, __user__={"valves": dict(valves)})
+    assert expected_key in (bare.get("image_config") or {}), f"{slug}: bare id regressed"
+
+    foreign: dict[str, Any] = {"model": prefix + "openai/gpt-5-image", "messages": []}
+    module.Filter().inlet(foreign, __metadata__={}, __user__={"valves": dict(valves)})
+    assert "image_config" not in foreign, f"{slug}: foreign model must stay ignored"
+
+
 def test_grok_filter_inlet_writes_grok_knobs_only_for_grok_models():
     source = render_grok_image_filter_source()
     module = _load_filter_from_source(source, "test_image_filter_grok_runtime")

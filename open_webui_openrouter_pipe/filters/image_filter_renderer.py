@@ -249,6 +249,16 @@ IMAGE_FILTER_VARIANT = "{spec.variant}"
 _GEMINI_MODEL_PATTERN = re.compile(r"^google/gemini-.*flash-image.*-preview$")
 
 
+def _canonical_model_slug(raw: str) -> str:
+    # OWUI manifold passes pipe-namespaced model ids ("<pipe_id>.<vendor>/<model>");
+    # the pipe id never contains "/", the slug always does, so strip a leading
+    # "<prefix>." before the vendor part so anchored patterns still match.
+    if "/" not in raw:
+        return raw
+    head, slash, tail = raw.partition("/")
+    return head.rsplit(".", 1)[-1] + slash + tail
+
+
 class Filter:
     toggle = True
 
@@ -285,7 +295,7 @@ class Filter:
         # Gemini Flash Image Preview variant. Defends against operator misconfiguration
         # (filter manually attached to non-Gemini model would otherwise send invalid params).
         model_id = body.get("model") or ""
-        if not isinstance(model_id, str) or not _GEMINI_MODEL_PATTERN.match(model_id):
+        if not isinstance(model_id, str) or not _GEMINI_MODEL_PATTERN.match(_canonical_model_slug(model_id)):
             return body
         user_valves = None
         if isinstance(__user__, dict):
@@ -357,6 +367,16 @@ IMAGE_FILTER_VARIANT = "{spec.variant}"
 # V2 Pro/Fast ONLY — Riverflow 2.5 gets its own dedicated filter (sourceful_v25)
 # because 2.5 dropped super_resolution_references.
 _SOURCEFUL_MODEL_PATTERN = re.compile(r"^sourceful/riverflow-v2-(pro|fast)$")
+
+
+def _canonical_model_slug(raw: str) -> str:
+    # OWUI manifold passes pipe-namespaced model ids ("<pipe_id>.<vendor>/<model>");
+    # the pipe id never contains "/", the slug always does, so strip a leading
+    # "<prefix>." before the vendor part so anchored patterns still match.
+    if "/" not in raw:
+        return raw
+    head, slash, tail = raw.partition("/")
+    return head.rsplit(".", 1)[-1] + slash + tail
 _MAX_FONT_INPUTS = 2
 _MAX_SUPER_RESOLUTION_REFERENCES = 4
 
@@ -429,7 +449,7 @@ class Filter:
         # Defends against operator misconfiguration (filter manually attached
         # to any other model would otherwise emit invalid params).
         model_id = body.get("model") or ""
-        if not isinstance(model_id, str) or not _SOURCEFUL_MODEL_PATTERN.match(model_id):
+        if not isinstance(model_id, str) or not _SOURCEFUL_MODEL_PATTERN.match(_canonical_model_slug(model_id)):
             return body
         user_valves = None
         if isinstance(__user__, dict):
@@ -530,6 +550,16 @@ OWUI_OPENROUTER_PIPE_MARKER = "{spec.marker}"
 IMAGE_FILTER_VARIANT = "{spec.variant}"
 
 _SOURCEFUL_V25_MODEL_PATTERN = re.compile(r"^sourceful/riverflow-v2\\.5-(pro|fast)$")
+
+
+def _canonical_model_slug(raw: str) -> str:
+    # OWUI manifold passes pipe-namespaced model ids ("<pipe_id>.<vendor>/<model>");
+    # the pipe id never contains "/", the slug always does, so strip a leading
+    # "<prefix>." before the vendor part so anchored patterns still match.
+    if "/" not in raw:
+        return raw
+    head, slash, tail = raw.partition("/")
+    return head.rsplit(".", 1)[-1] + slash + tail
 _HEX_COLOR_PATTERN = re.compile(r"^#(?:[0-9a-fA-F]{{3}}|[0-9a-fA-F]{{6}})$")
 _MAX_FONT_INPUTS = 2
 
@@ -627,7 +657,7 @@ class Filter:
         # Defends against operator misconfiguration (filter manually attached
         # to another model would otherwise emit invalid params).
         model_id = body.get("model") or ""
-        if not isinstance(model_id, str) or not _SOURCEFUL_V25_MODEL_PATTERN.match(model_id):
+        if not isinstance(model_id, str) or not _SOURCEFUL_V25_MODEL_PATTERN.match(_canonical_model_slug(model_id)):
             return body
         user_valves = None
         if isinstance(__user__, dict):
@@ -733,6 +763,16 @@ IMAGE_FILTER_VARIANT = "{spec.variant}"
 _RECRAFT_MODEL_PATTERN = re.compile(r"^recraft/recraft-")
 
 
+def _canonical_model_slug(raw: str) -> str:
+    # OWUI manifold passes pipe-namespaced model ids ("<pipe_id>.<vendor>/<model>");
+    # the pipe id never contains "/", the slug always does, so strip a leading
+    # "<prefix>." before the vendor part so anchored patterns still match.
+    if "/" not in raw:
+        return raw
+    head, slash, tail = raw.partition("/")
+    return head.rsplit(".", 1)[-1] + slash + tail
+
+
 class ImageGenerationError(Exception):
     """Raised at inlet when Recraft-specific input validation fails (malformed
     JSON, out-of-range RGB components, wrong array shape)."""
@@ -820,7 +860,7 @@ class Filter:
         # Defends against operator misconfiguration (filter manually attached to
         # non-Recraft model would otherwise emit invalid params).
         model_id = body.get("model") or ""
-        if not isinstance(model_id, str) or not _RECRAFT_MODEL_PATTERN.match(model_id):
+        if not isinstance(model_id, str) or not _RECRAFT_MODEL_PATTERN.match(_canonical_model_slug(model_id)):
             return body
         user_valves = None
         if isinstance(__user__, dict):
@@ -900,6 +940,16 @@ OWUI_OPENROUTER_PIPE_MARKER = "{spec.marker}"
 IMAGE_FILTER_VARIANT = "{spec.variant}"
 
 _RECRAFT_V3_MODEL_PATTERN = re.compile(r"^recraft/recraft-v3$")
+
+
+def _canonical_model_slug(raw: str) -> str:
+    # OWUI manifold passes pipe-namespaced model ids ("<pipe_id>.<vendor>/<model>");
+    # the pipe id never contains "/", the slug always does, so strip a leading
+    # "<prefix>." before the vendor part so anchored patterns still match.
+    if "/" not in raw:
+        return raw
+    head, slash, tail = raw.partition("/")
+    return head.rsplit(".", 1)[-1] + slash + tail
 
 
 class ImageGenerationError(Exception):
@@ -1002,7 +1052,7 @@ class Filter:
         # or text_layout, so even if filter is manually attached to them we drop
         # the params instead of sending invalid input).
         model_id = body.get("model") or ""
-        if not isinstance(model_id, str) or not _RECRAFT_V3_MODEL_PATTERN.match(model_id):
+        if not isinstance(model_id, str) or not _RECRAFT_V3_MODEL_PATTERN.match(_canonical_model_slug(model_id)):
             return body
         user_valves = None
         if isinstance(__user__, dict):
@@ -1077,6 +1127,16 @@ IMAGE_FILTER_VARIANT = "{spec.variant}"
 _GROK_IMAGINE_IMAGE_PATTERN = re.compile(r"^x-ai/grok-imagine-image-")
 
 
+def _canonical_model_slug(raw: str) -> str:
+    # OWUI manifold passes pipe-namespaced model ids ("<pipe_id>.<vendor>/<model>");
+    # the pipe id never contains "/", the slug always does, so strip a leading
+    # "<prefix>." before the vendor part so anchored patterns still match.
+    if "/" not in raw:
+        return raw
+    head, slash, tail = raw.partition("/")
+    return head.rsplit(".", 1)[-1] + slash + tail
+
+
 class Filter:
     toggle = True
 
@@ -1126,7 +1186,7 @@ class Filter:
         # models. Defends against operator misconfiguration (filter manually
         # attached to non-Grok model would otherwise emit invalid params).
         model_id = body.get("model") or ""
-        if not isinstance(model_id, str) or not _GROK_IMAGINE_IMAGE_PATTERN.match(model_id):
+        if not isinstance(model_id, str) or not _GROK_IMAGINE_IMAGE_PATTERN.match(_canonical_model_slug(model_id)):
             return body
         user_valves = None
         if isinstance(__user__, dict):
