@@ -628,12 +628,13 @@ def test_sora_drops_all_attachments():
     assert "audio_attachments" not in video_meta
 
 
-def test_payload_routes_video_attachment_url_to_video_field_for_wan_2_7():
+@pytest.mark.asyncio
+async def test_payload_routes_video_attachment_url_to_video_field_for_wan_2_7():
     """`_build_payload` routes a single video data URL to params.video for Wan 2.7."""
     pipe = Pipe()
     adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
     data_url = "data:video/mp4;base64,AAAA"
-    payload = adapter._build_payload(
+    payload = await adapter._build_payload(
         api_model_id="alibaba/wan-2.7",
         prompt="x",
         video_meta={"params": {}},
@@ -645,11 +646,12 @@ def test_payload_routes_video_attachment_url_to_video_field_for_wan_2_7():
     assert payload["video"] == data_url
 
 
-def test_payload_routes_multiple_video_urls_to_videos_array_for_wan_2_7():
+@pytest.mark.asyncio
+async def test_payload_routes_multiple_video_urls_to_videos_array_for_wan_2_7():
     pipe = Pipe()
     adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
     urls = ["data:video/mp4;base64,AAAA", "data:video/mp4;base64,BBBB"]
-    payload = adapter._build_payload(
+    payload = await adapter._build_payload(
         api_model_id="alibaba/wan-2.7",
         prompt="x",
         video_meta={"params": {}},
@@ -661,11 +663,12 @@ def test_payload_routes_multiple_video_urls_to_videos_array_for_wan_2_7():
     assert payload["videos"] == [{"url": urls[0]}, {"url": urls[1]}]
 
 
-def test_payload_routes_audio_attachment_for_wan_2_6():
+@pytest.mark.asyncio
+async def test_payload_routes_audio_attachment_for_wan_2_6():
     pipe = Pipe()
     adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
     data_url = "data:audio/mpeg;base64,AAAA"
-    payload = adapter._build_payload(
+    payload = await adapter._build_payload(
         api_model_id="alibaba/wan-2.6",
         prompt="x",
         video_meta={"params": {}},
@@ -677,11 +680,12 @@ def test_payload_routes_audio_attachment_for_wan_2_6():
     assert payload["audio"] == data_url
 
 
-def test_payload_routes_audio_attachment_for_wan_2_7():
+@pytest.mark.asyncio
+async def test_payload_routes_audio_attachment_for_wan_2_7():
     pipe = Pipe()
     adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
     data_url = "data:audio/mpeg;base64,AAAA"
-    payload = adapter._build_payload(
+    payload = await adapter._build_payload(
         api_model_id="alibaba/wan-2.7",
         prompt="x",
         video_meta={"params": {}},
@@ -693,12 +697,13 @@ def test_payload_routes_audio_attachment_for_wan_2_7():
     assert payload["audio"] == data_url
 
 
-def test_data_urls_bypass_ssrf_validator():
+@pytest.mark.asyncio
+async def test_data_urls_bypass_ssrf_validator():
     """Data URLs are inline content with no network fetch — must be allowed through
     `_validate_passthrough_urls` without DNS resolution."""
     pipe = Pipe()
     adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
-    payload = adapter._build_payload(
+    payload = await adapter._build_payload(
         api_model_id="alibaba/wan-2.7",
         prompt="x",
         video_meta={"params": {"audio": "data:audio/mpeg;base64,AAAA"}},
@@ -1127,10 +1132,11 @@ def test_provider_options_normalise_to_parameters_wrapper():
     assert wrapped["fal"] == {"parameters": {"motion": "slow"}}
 
 
-def test_video_payload_drops_unsupported_passthrough_and_preserves_provider_casing():
+@pytest.mark.asyncio
+async def test_video_payload_drops_unsupported_passthrough_and_preserves_provider_casing():
     adapter = VideoGenerationAdapter(pipe=Pipe(), logger=_test_logger())
 
-    unsupported = adapter._build_payload(
+    unsupported = await adapter._build_payload(
         api_model_id="unknown/video",
         prompt="make a video",
         video_meta={"params": {"surprise": "value"}},
@@ -1138,7 +1144,7 @@ def test_video_payload_drops_unsupported_passthrough_and_preserves_provider_casi
         frame_images=[],
         provider_options={},
     )
-    veo = adapter._build_payload(
+    veo = await adapter._build_payload(
         api_model_id="google/veo-3.1",
         prompt="make a video",
         video_meta={"params": {"aspect_ratio": "16:9"}},
@@ -1457,12 +1463,13 @@ def test_video_help_includes_cfg_scale_for_kling_v3_only():
     assert "`CFG scale`" not in o1_rendered, "kwaivgi/kling-video-o1 should not show CFG scale (cfg_scale not in passthrough)"
 
 
-def test_payload_includes_seed_and_generate_audio_for_capable_models(monkeypatch):
+@pytest.mark.asyncio
+async def test_payload_includes_seed_and_generate_audio_for_capable_models(monkeypatch):
     pipe = Pipe()
     adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
     monkeypatch.setattr(pipe._multimodal_handler, "_is_safe_url_blocking", lambda url: True)
 
-    payload = adapter._build_payload(
+    payload = await adapter._build_payload(
         api_model_id="google/veo-3.1",
         prompt="a sunset over mountains",
         video_meta={"params": {"seed": 7, "generate_audio": False}},
@@ -1475,12 +1482,13 @@ def test_payload_includes_seed_and_generate_audio_for_capable_models(monkeypatch
     assert payload["generate_audio"] is False
 
 
-def test_payload_drops_seed_for_seed_incapable_models(monkeypatch):
+@pytest.mark.asyncio
+async def test_payload_drops_seed_for_seed_incapable_models(monkeypatch):
     pipe = Pipe()
     adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
     monkeypatch.setattr(pipe._multimodal_handler, "_is_safe_url_blocking", lambda url: True)
 
-    payload = adapter._build_payload(
+    payload = await adapter._build_payload(
         api_model_id="kwaivgi/kling-video-o1",
         prompt="a quiet room",
         video_meta={"params": {"seed": 7}},
@@ -1492,12 +1500,13 @@ def test_payload_drops_seed_for_seed_incapable_models(monkeypatch):
     assert "seed" not in payload
 
 
-def test_generate_audio_does_not_clobber_audio_url_on_wan(monkeypatch):
+@pytest.mark.asyncio
+async def test_generate_audio_does_not_clobber_audio_url_on_wan(monkeypatch):
     pipe = Pipe()
     adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
     monkeypatch.setattr(pipe._multimodal_handler, "_is_safe_url_blocking", lambda url: True)
 
-    payload = adapter._build_payload(
+    payload = await adapter._build_payload(
         api_model_id="alibaba/wan-2.7",
         prompt="a campfire",
         video_meta={"params": {"audio": "https://example.com/voice.mp3", "generate_audio": True}},
@@ -1510,12 +1519,13 @@ def test_generate_audio_does_not_clobber_audio_url_on_wan(monkeypatch):
     assert payload["generate_audio"] is True
 
 
-def test_unsafe_url_in_passthrough_raises():
+@pytest.mark.asyncio
+async def test_unsafe_url_in_passthrough_raises():
     pipe = Pipe()
     adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
 
     with pytest.raises(VideoGenerationError, match="Refusing to forward unsafe URL"):
-        adapter._build_payload(
+        await adapter._build_payload(
             api_model_id="alibaba/wan-2.7",
             prompt="a campfire",
             video_meta={"params": {"audio": "file:///etc/passwd"}},
@@ -1865,3 +1875,28 @@ async def test_safe_emit_swallows_non_cancelled_exceptions():
         raise RuntimeError("emit failed")
 
     await adapter._safe_emit(failing_emitter, {"type": "status", "data": {}})
+
+
+@pytest.mark.asyncio
+async def test_passthrough_validation_uses_async_safe_url(monkeypatch):
+    """Passthrough URL validation must use the async _is_safe_url (DNS offloaded
+    to a thread), not _is_safe_url_blocking which stalls the shared event loop."""
+    pipe = Pipe()
+    adapter = pipe._ensure_video_generation_adapter()
+    handler = pipe._multimodal_handler
+
+    async_called: list = []
+
+    async def fake_async(url):
+        async_called.append(url)
+        return True
+
+    def fake_blocking(url):
+        raise AssertionError("must not call blocking DNS on the event loop")
+
+    monkeypatch.setattr(handler, "_is_safe_url", fake_async)
+    monkeypatch.setattr(handler, "_is_safe_url_blocking", fake_blocking)
+
+    payload = {"video": "https://example.test/clip.mp4"}
+    await adapter._validate_passthrough_urls(payload)
+    assert async_called == ["https://example.test/clip.mp4"]

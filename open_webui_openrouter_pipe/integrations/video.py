@@ -366,7 +366,7 @@ class VideoGenerationAdapter:
             video_attachment_urls = await self._encode_video_attachments(video_meta, valves)
             audio_attachment_url = await self._encode_audio_attachment(video_meta, valves)
             provider_options = self._extract_provider_options(getattr(responses_body, "provider", None), metadata)
-            payload = self._build_payload(
+            payload = await self._build_payload(
                 api_model_id=api_model_id,
                 prompt=prompt,
                 video_meta=video_meta,
@@ -828,7 +828,7 @@ class VideoGenerationAdapter:
             else:
                 self._pipe._video_user_active_counts[user_id] = current - 1
 
-    def _build_payload(
+    async def _build_payload(
         self,
         *,
         api_model_id: str,
@@ -863,7 +863,7 @@ class VideoGenerationAdapter:
                 payload["videos"] = [{"url": video_attachment_urls[0]}]
         if audio_attachment_url and "audio" in allowed:
             payload["audio"] = audio_attachment_url
-        self._validate_passthrough_urls(payload)
+        await self._validate_passthrough_urls(payload)
         if frame_images:
             payload["frame_images"] = frame_images
         if input_references:
@@ -872,15 +872,18 @@ class VideoGenerationAdapter:
             payload["provider"] = {"options": self._normalise_provider_options(provider_options)}
         return payload
 
-    def _validate_passthrough_urls(self, payload: dict[str, Any]) -> None:
+    async def _validate_passthrough_urls(self, payload: dict[str, Any]) -> None:
         url_fields = ("audio", "last_image", "video")
         array_fields = ("videos", "images")
         handler = self._pipe._multimodal_handler
 
-        def _check(url: str, field_name: str) -> None:
+        async def _check(url: str, field_name: str) -> None:
             if url.startswith("data:"):
                 return
-            if not handler._is_safe_url_blocking(url):
+            # Use the async safe-URL check so the DNS lookup is offloaded to a
+            # worker thread instead of blocking the shared event loop on the
+            # per-request hot path.
+            if not await handler._is_safe_url(url):
                 raise VideoGenerationError(
                     f"Refusing to forward unsafe URL in '{field_name}'. Use https:// or "
                     f"an allowlisted http:// destination."
@@ -894,7 +897,7 @@ class VideoGenerationAdapter:
             if not cleaned:
                 payload.pop(field_name, None)
                 continue
-            _check(cleaned, field_name)
+            await _check(cleaned, field_name)
             payload[field_name] = cleaned
 
         for field_name in array_fields:
@@ -912,7 +915,7 @@ class VideoGenerationAdapter:
                 if not isinstance(url, str) or not url.strip():
                     continue
                 cleaned = url.strip()
-                _check(cleaned, f"{field_name}[{idx}]")
+                await _check(cleaned, f"{field_name}[{idx}]")
                 if isinstance(item, dict):
                     new_item = dict(item)
                     new_item["url"] = cleaned
