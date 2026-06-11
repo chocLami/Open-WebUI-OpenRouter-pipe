@@ -276,6 +276,58 @@ class TestServiceError:
         assert "Error ID:" in content
 
 
+class TestRateLimitRetryAfter:
+    """4xx Retry-After header parsing in the pipe-level error handler."""
+
+    @pytest.mark.asyncio
+    async def test_4xx_http_date_retry_after_parsed_to_seconds(self, mock_pipe, mock_event_emitter):
+        """A 429 carrying an HTTP-date Retry-After must store NUMERIC
+        retry_after_seconds in the error metadata, not the raw date string."""
+        from unittest.mock import AsyncMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_response.reason_phrase = "Too Many Requests"
+        mock_response.headers = {"Retry-After": "Wed, 21 Oct 2099 07:28:00 GMT"}
+        mock_response.aread = AsyncMock(return_value=b'{"error": {"message": "rate limited"}}')
+        error = httpx.HTTPStatusError("429", request=MagicMock(), response=mock_response)
+
+        report_mock = AsyncMock()
+        formatter = mock_pipe._ensure_error_formatter()
+
+        with aioresponses() as mock_http:
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload={"data": [{"id": "test-model", "name": "Test Model", "pricing": {"prompt": "0", "completion": "0"}}]},
+            )
+            with patch.object(mock_pipe, "_process_transformed_request", side_effect=error), \
+                 patch.object(formatter, "_report_openrouter_error", report_mock):
+                mock_pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+                mock_pipe.valves.API_KEY = EncryptedStr("test-key")
+                mock_pipe.valves.MODEL_CATALOG_REFRESH_SECONDS = 300
+                async with aiohttp.ClientSession() as session:
+                    await mock_pipe._handle_pipe_call(
+                        body={"model": "test-model"},
+                        __user__={"id": "test-user"},
+                        __request__=MagicMock(),
+                        __event_emitter__=mock_event_emitter,
+                        __event_call__=None,
+                        __metadata__={"model": {"id": "test-model"}},
+                        __tools__=None,
+                        valves=mock_pipe.valves,
+                        session=session,
+                    )
+
+        assert report_mock.await_count == 1, "error was not reported"
+        err = report_mock.call_args.args[0]
+        ras = err.metadata.get("retry_after_seconds")
+        assert isinstance(ras, (int, float)) and not isinstance(ras, bool), f"expected numeric, got {ras!r}"
+        assert ras > 0
+        # raw header preserved separately; parsed value is not the GMT string
+        assert err.metadata.get("retry_after") == "Wed, 21 Oct 2099 07:28:00 GMT"
+        assert ras != "Wed, 21 Oct 2099 07:28:00 GMT"
+
+
 class TestInternalError:
     """Test generic exception handling."""
 

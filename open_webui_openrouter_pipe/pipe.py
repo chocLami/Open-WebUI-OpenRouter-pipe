@@ -106,7 +106,7 @@ from .core.config import (
     _OPENROUTER_REFERER,
     _select_openrouter_http_referer,
 )
-from .core.utils import _extract_feature_flags, _await_if_needed, _render_error_template
+from .core.utils import _extract_feature_flags, _await_if_needed, _render_error_template, _apply_retry_after_metadata
 from .core.errors import _build_openrouter_api_error, OpenRouterAPIError
 from .models.registry import (
     OpenRouterModelRegistry,
@@ -2226,10 +2226,7 @@ class Pipe:
                     body_text = None
             extra_meta: dict[str, Any] = {}
             if e.response is not None:
-                retry_after = e.response.headers.get("Retry-After") or e.response.headers.get("retry-after")
-                if retry_after:
-                    extra_meta["retry_after"] = retry_after
-                    extra_meta["retry_after_seconds"] = retry_after
+                _apply_retry_after_metadata(extra_meta, e.response.headers)
                 rate_scope = (
                     e.response.headers.get("X-RateLimit-Scope")
                     or e.response.headers.get("x-ratelimit-scope")
