@@ -4802,6 +4802,24 @@ def test_apply_gemini_thinking_config_sets_budget():
         pipe.shutdown()
 
 
+def test_apply_gemini_thinking_config_budget_zero_disables_thinking():
+    """GEMINI_THINKING_BUDGET=0 (the documented disable value) must turn thinking
+    OFF, not emit the contradictory {include_thoughts: True, thinking_budget: 0}
+    that the provider rejects."""
+    pipe = Pipe()
+    ModelFamily.set_dynamic_specs({
+        "google.gemini-2.5-flash": {"supported_parameters": ["reasoning"]}
+    })
+    try:
+        valves = pipe.Valves(REASONING_EFFORT="medium", GEMINI_THINKING_BUDGET=0)
+        body = ResponsesBody(model="google/gemini-2.5-flash", input=[])
+        pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences(body, valves)
+        pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config(body, valves)
+        assert body.thinking_config is None
+    finally:
+        pipe.shutdown()
+
+
 # ============================================================================
 # Anthropic verbosity mapping (xhigh → verbosity: "max")
 # ============================================================================

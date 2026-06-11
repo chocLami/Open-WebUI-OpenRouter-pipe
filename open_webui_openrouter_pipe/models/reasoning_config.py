@@ -146,7 +146,11 @@ class ReasoningConfigManager:
 
         thinking_config: dict[str, Any] = {"include_thoughts": True}
         budget = _map_effort_to_gemini_budget(effort_hint, valves.GEMINI_THINKING_BUDGET)
-        if budget is None:
+        # A budget of 0 (GEMINI_THINKING_BUDGET=0, the documented "disable
+        # thinking" value) means thinking is off, same as None — valid budgets
+        # are always >= 1. Emitting include_thoughts=True with thinking_budget=0
+        # is contradictory and the provider rejects it, so disable here.
+        if not budget:
             responses_body.thinking_config = None
             setattr(responses_body, "include_reasoning", False)
             return
