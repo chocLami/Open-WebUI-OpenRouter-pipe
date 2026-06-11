@@ -950,7 +950,10 @@ class TestWriteSessionLogArchive:
             names = zf.namelist()
             assert "meta.json" in names
             assert "logs.txt" in names
-            assert "logs.jsonl" not in names
+            # logs.jsonl is ALWAYS written as the canonical machine-readable
+            # record (even in "text" mode) so re-assembly can merge/dedup prior
+            # events — read_archive_events reads logs.jsonl only.
+            assert "logs.jsonl" in names
 
     def test_archive_creates_zip_both_format(self, tmp_path: Path) -> None:
         """Creates zip archive with both text and JSONL formats."""

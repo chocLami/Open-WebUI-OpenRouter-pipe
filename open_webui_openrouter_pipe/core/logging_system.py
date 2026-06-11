@@ -319,7 +319,9 @@ def write_session_log_archive(job: _SessionLogArchiveJob) -> None:
     The archive contains:
     - meta.json: Metadata including timestamps, IDs, and configuration
     - logs.txt: Text-formatted logs (if log_format is "text" or "both")
-    - logs.jsonl: JSONL-formatted logs (if log_format is "jsonl" or "both")
+    - logs.jsonl: JSONL-formatted logs — ALWAYS written as the canonical,
+      machine-readable record so re-assembly can merge/dedup prior events even
+      when log_format is "text" (read_archive_events reads logs.jsonl only).
 
     All files are encrypted using AES encryption with the provided password.
     Atomic file replacement is used to prevent partial writes.
@@ -384,7 +386,11 @@ def write_session_log_archive(job: _SessionLogArchiveJob) -> None:
     if log_format not in {"jsonl", "text", "both"}:
         log_format = "jsonl"
     write_text = log_format in {"text", "both"}
-    write_jsonl = log_format in {"jsonl", "both"}
+    # Always write logs.jsonl as the canonical, machine-readable record.
+    # read_archive_events merges/dedups prior events from logs.jsonl on
+    # re-assembly; in pure "text" mode that file was absent, so a re-assembly
+    # for the same message_id silently dropped the earlier invocation's events.
+    write_jsonl = True
 
     def _format_asctime_local(created: float) -> str:
         try:

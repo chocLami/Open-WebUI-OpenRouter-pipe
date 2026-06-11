@@ -943,3 +943,51 @@ def test_session_logger_concurrent_writes_same_request() -> None:
 
     SessionLogger.logs.clear()
     SessionLogger._session_last_seen.clear()
+
+
+def test_text_format_archive_still_contains_jsonl_and_is_mergeable(tmp_path, pipe_instance) -> None:
+    """A 'text' log_format archive must still contain logs.jsonl (the canonical
+    machine-readable record) so read_archive_events can merge prior events on
+    re-assembly. Previously text mode wrote only logs.txt, so a re-assembly for
+    the same message_id silently dropped the earlier invocation's events."""
+    import pyzipper
+
+    pipe = pipe_instance
+    password = b"correct horse battery staple"
+    job = _SessionLogArchiveJob(
+        base_dir=str(tmp_path),
+        zip_password=password,
+        zip_compression="lzma",
+        zip_compresslevel=None,
+        user_id="u1",
+        session_id="s1",
+        chat_id="c1",
+        message_id="m1",
+        request_id="r1",
+        created_at=1_700_000_000.0,
+        log_format="text",
+        log_events=[
+            {
+                "created": 1_700_000_000.0,
+                "level": "INFO",
+                "request_id": "r1",
+                "lineno": 1,
+                "message": "hello-text-mode",
+            },
+        ],
+    )
+
+    pipe._session_log_manager._write_archive(job)
+    out_path = tmp_path / "u1" / "c1" / "m1.zip"
+    assert out_path.exists()
+
+    with pyzipper.AESZipFile(out_path) as zf:
+        zf.setpassword(password)
+        names = set(zf.namelist())
+        assert "logs.txt" in names, "human-readable text log should still be present"
+        assert "logs.jsonl" in names, "canonical jsonl must be written even in text mode"
+
+    # read_archive_events must recover the events so re-assembly can merge them
+    settings = (str(tmp_path), password, "lzma", None)
+    events = pipe._session_log_manager.read_archive_events(out_path, settings)
+    assert any(e.get("message") == "hello-text-mode" for e in events)
