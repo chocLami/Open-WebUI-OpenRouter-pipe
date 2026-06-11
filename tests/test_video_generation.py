@@ -244,6 +244,67 @@ async def test_video_lifecycle_bg_task_does_not_emit_chat_completion(monkeypatch
     )
 
 
+@pytest.mark.asyncio
+async def test_video_lifecycle_removes_temp_directory(monkeypatch):
+    """The per-job mkdtemp directory must be removed after the lifecycle so it
+    doesn't leak one empty dir per generation (inode exhaustion over time)."""
+    from open_webui_openrouter_pipe.integrations.video_types import VideoLifecycleResult
+
+    pipe = Pipe()
+    pipe.valves.API_KEY = EncryptedStr("test")
+    pipe.valves.VIDEO_INITIAL_POLL_DELAY_SECONDS = 0
+    pipe.valves.VIDEO_POLL_INTERVAL_SECONDS = 0
+    pipe.valves.VIDEO_POLL_INTERVAL_MAX_SECONDS = 0
+    adapter = pipe._ensure_video_generation_adapter()
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def status(self, _job_id):
+            return {"status": "completed", "usage": {"cost": 0.1}}
+
+        def content_url(self, job_id):
+            return f"https://example.test/videos/{job_id}/content"
+
+        def bearer_header(self):
+            return {"Authorization": "Bearer test"}
+
+    captured_dirs: list = []
+
+    async def fake_streaming_download(url, dest_path, **_kwargs):
+        captured_dirs.append(dest_path.parent)  # the mkdtemp dir
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(MP4_BYTES)
+        return {"path": dest_path, "mime_type": "video/mp4", "url": url, "size_bytes": len(MP4_BYTES)}
+
+    async def fake_upload_from_path(*_args, **_kwargs):
+        return "file-1"
+
+    monkeypatch.setattr("open_webui_openrouter_pipe.integrations.video.OpenRouterVideoClient", FakeClient)
+    monkeypatch.setattr(pipe, "_create_http_session", lambda *_args, **_kwargs: _FakeSession([]))
+    monkeypatch.setattr(pipe._multimodal_handler, "_download_remote_url_streaming", fake_streaming_download)
+    monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage_from_path", fake_upload_from_path)
+
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    message_lock = asyncio.Lock()
+    await message_lock.acquire()
+
+    result = await adapter._run_lifecycle_after_submit(
+        key=("chat-1", "msg-1"), job_id="job-1", api_model_id="openai/sora-2-pro",
+        normalized_model_id="openai.sora-2-pro", valves=pipe.valves,
+        event_emitter=lambda _e: asyncio.sleep(0), user={"id": "u"}, user_obj={"id": "u"},
+        chat_id="chat-1", message_id="msg-1", request=None, user_id="u",
+        global_semaphore=semaphore, message_lock=message_lock, started_at=time.monotonic(),
+    )
+
+    assert isinstance(result, VideoLifecycleResult)
+    assert captured_dirs, "download was not invoked"
+    for d in captured_dirs:
+        assert not d.exists(), f"temp dir leaked: {d}"
+
+
 def test_video_filter_spec_strips_vendor_prefix_from_display_name():
     model = {
         "id": "google/veo-3.1-lite",

@@ -5,6 +5,7 @@ import base64
 import contextlib
 import logging
 import re
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -523,6 +524,7 @@ class VideoGenerationAdapter:
         output_mime = ""
         description = ""
         downloaded = None
+        tmp_dir: Path | None = None
         try:
             await self._emit_status(event_emitter, "Video generation job accepted.", done=False, progress=5)
             session = self._pipe._create_http_session(valves)
@@ -650,6 +652,12 @@ class VideoGenerationAdapter:
             if downloaded is not None:
                 with contextlib.suppress(Exception):
                     downloaded.path.unlink(missing_ok=True)
+            # Remove the per-job temp directory created by mkdtemp; the file
+            # inside is unlinked above, but the directory itself would otherwise
+            # leak one empty dir per generation (inode exhaustion over time).
+            if tmp_dir is not None:
+                with contextlib.suppress(Exception):
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
             async with self._pipe._video_active_tasks_dict_lock:
                 current = self._pipe._video_active_tasks.get(key)
                 if current is asyncio.current_task():
