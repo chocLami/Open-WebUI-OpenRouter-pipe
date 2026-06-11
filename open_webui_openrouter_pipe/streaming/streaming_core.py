@@ -129,6 +129,16 @@ from ..api.transforms import _responses_input_to_chat_messages
 OWUI_REASONING_TIMING_BOUNDARY_MARKER = " "
 
 
+def _citation_host(url: str) -> str:
+    """Extract a display host from a citation URL, dropping a leading "www.".
+
+    Uses ``removeprefix`` (not ``lstrip``, which strips a character *set* and
+    would corrupt hosts beginning with 'w'/'.', e.g. weather.com -> eather.com).
+    """
+    host = url.split("//", 1)[-1].split("/", 1)[0].lower()
+    return host.removeprefix("www.")
+
+
 def _append_hidden_marker_block(text: str, marker: str) -> str:
     """Append a hidden marker line to text using the same spacing as ULID markers."""
     if text:
@@ -983,7 +993,7 @@ class StreamingHandler:
             for url, title in _parse_url_citation_annotations(raw_annotations):
                 if url.endswith("?utm_source=openai"):
                     url = url[: -len("?utm_source=openai")]
-                host = url.split("//", 1)[-1].split("/", 1)[0].lower().lstrip("www.")
+                host = _citation_host(url)
                 citation = {
                     "source": {"name": host or "source", "url": url},
                     "document": [title],
@@ -1385,7 +1395,7 @@ class StreamingHandler:
                             # Emit a citation event so Open WebUI can render
                             # references in the footer instead of mutating the
                             # streaming text (which was causing inline [n] markers).
-                            host = url.split("//", 1)[-1].split("/", 1)[0].lower().lstrip("www.")
+                            host = _citation_host(url)
                             citation = {
                                 "source": {"name": host or "source", "url": url},
                                 "document": [title],

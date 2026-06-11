@@ -11055,3 +11055,21 @@ class TestOpenRouterServerToolCards:
         unmatched = [r for r in caplog.records
                      if "Tool card(s) emitted without matching" in r.getMessage()]
         assert len(unmatched) == 0
+
+
+def test_citation_host_strips_www_prefix_not_character_set():
+    """Regression: host display must use removeprefix('www.'), not lstrip('www.')
+    (which strips the character set {w,.} and corrupts hosts starting with 'w')."""
+    from open_webui_openrouter_pipe.streaming.streaming_core import _citation_host
+
+    # www. prefix is removed exactly once
+    assert _citation_host("https://www.example.com/path") == "example.com"
+    # hosts beginning with 'w' must survive intact (the old lstrip bug)
+    assert _citation_host("https://weather.com/forecast") == "weather.com"
+    assert _citation_host("https://wikipedia.org/wiki/X") == "wikipedia.org"
+    assert _citation_host("https://wsj.com/a") == "wsj.com"
+    assert _citation_host("https://web.archive.org/x") == "web.archive.org"
+    # no scheme / no path still works
+    assert _citation_host("example.com") == "example.com"
+    # only a leading www. is stripped, not an internal one
+    assert _citation_host("https://wwworld.com") == "wwworld.com"
