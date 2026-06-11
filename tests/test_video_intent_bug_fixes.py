@@ -60,7 +60,7 @@ class TestRetargetingNotADowngrade:
             prompt="x", use_user_prompt=False, language="en",
             confidence="high", clarification=None, reason="",
         )
-        video_meta = {"frame_images": [{"id": "abc", "kind": "first_frame"}]}
+        video_meta = {"frame_images": [{"id": "abc", "frame_type": "first_frame"}]}
         adapter._apply_uploaded_attachment_retargeting(intent, video_meta)
         assert intent.frames_retargeted == 1
         # No retargeting strings in downgrades — that's the whole point.
@@ -79,7 +79,7 @@ class TestRetargetingNotADowngrade:
             prompt="x", use_user_prompt=False, language="en",
             confidence="high", clarification=None, reason="",
         )
-        video_meta = {"frame_images": [{"id": "abc", "kind": "first_frame"}]}
+        video_meta = {"frame_images": [{"id": "abc", "frame_type": "first_frame"}]}
         adapter._apply_uploaded_attachment_retargeting(intent, video_meta)
         assert intent.frames_retargeted == 0
 
@@ -101,12 +101,32 @@ class TestRetargetingNotADowngrade:
             confidence="high", clarification=None, reason="",
         )
         video_meta = {"frame_images": [
-            {"id": "a", "kind": "first_frame"},
-            {"id": "b", "kind": "last_frame"},
+            {"id": "a", "frame_type": "first_frame"},
+            {"id": "b", "frame_type": "last_frame"},
         ]}
         adapter._apply_uploaded_attachment_retargeting(intent, video_meta)
         assert intent.frames_retargeted == 2
         assert not any("retargeted" in d for d in intent.downgrades)
+
+    def test_retarget_actually_rewrites_frame_type_value(self):
+        """The retarget must write the 'frame_type' key that _encode_frame_images
+        reads — not a dead 'kind' field — so 'use this as the last frame' takes
+        effect. Regression guard for the kind/frame_type mismatch."""
+        adapter = _adapter()
+        intent = VideoIntentResult(
+            intent="image_to_video",
+            frame_plan=[FramePlanEntry(
+                source="uploaded_attachment", source_index=0,
+                timestamp_seconds=None, target="last_frame",
+            )],
+            prompt="x", use_user_prompt=False, language="en",
+            confidence="high", clarification=None, reason="",
+        )
+        video_meta = {"frame_images": [{"id": "abc", "frame_type": "first_frame"}]}
+        adapter._apply_uploaded_attachment_retargeting(intent, video_meta)
+        item = video_meta["frame_images"][0]
+        assert item["frame_type"] == "last_frame", "retarget did not update frame_type"
+        assert "kind" not in item, "must not write the dead 'kind' field"
 
     def test_invalid_index_still_goes_to_downgrades(self):
         # Invalid index IS a real degradation (we couldn't honor the
@@ -121,7 +141,7 @@ class TestRetargetingNotADowngrade:
             prompt="x", use_user_prompt=False, language="en",
             confidence="high", clarification=None, reason="",
         )
-        video_meta = {"frame_images": [{"id": "abc", "kind": "first_frame"}]}
+        video_meta = {"frame_images": [{"id": "abc", "frame_type": "first_frame"}]}
         adapter._apply_uploaded_attachment_retargeting(intent, video_meta)
         assert intent.frames_retargeted == 0
         assert any("retarget_skipped_invalid_index" in d for d in intent.downgrades)

@@ -248,10 +248,10 @@ class TestExplicitAttachmentsRetarget:
         assert adapter._intent_classifier_should_run(
             valves=valves, persisted_content="", prompt="use this as the last frame",
             body={"messages": [{"role": "user", "content": "x"}, {"role": "user", "content": "x"}]},
-            video_meta={"frame_images": [{"id": "abc", "kind": "first_frame"}]},
+            video_meta={"frame_images": [{"id": "abc", "frame_type": "first_frame"}]},
         )
 
-    def test_apply_uploaded_attachment_retargeting_updates_kind(self):
+    def test_apply_uploaded_attachment_retargeting_updates_frame_type(self):
         from open_webui_openrouter_pipe.integrations.video import (
             VideoGenerationAdapter,
         )
@@ -265,9 +265,9 @@ class TestExplicitAttachmentsRetarget:
                 timestamp_seconds=None, target="last_frame",
             )],
         )
-        video_meta = {"frame_images": [{"id": "abc", "kind": "first_frame"}]}
+        video_meta = {"frame_images": [{"id": "abc", "frame_type": "first_frame"}]}
         adapter._apply_uploaded_attachment_retargeting(intent, video_meta)
-        assert video_meta["frame_images"][0]["kind"] == "last_frame"
+        assert video_meta["frame_images"][0]["frame_type"] == "last_frame"
         # Successful retargeting is tracked on the dedicated counter (NOT in
         # downgrades), so it doesn't surface to users as a 'non-critical step
         # was skipped' warning.

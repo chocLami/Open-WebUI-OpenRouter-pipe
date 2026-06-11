@@ -1245,15 +1245,18 @@ class VideoGenerationAdapter:
             target = frame_images[idx]
             if not isinstance(target, dict):
                 continue
-            existing_kind = target.get("kind")
-            if existing_kind != entry.target:
-                target["kind"] = entry.target
+            # frame_images dicts are keyed by "frame_type" (see _encode_frame_images
+            # and the video filter renderer); writing "kind" was a dead field that
+            # nothing read, so "use this as the last frame" was silently ignored.
+            existing_frame_type = target.get("frame_type")
+            if existing_frame_type != entry.target:
+                target["frame_type"] = entry.target
                 retargeted += 1
         if retargeted:
             intent.frames_retargeted += retargeted
             self.logger.debug(
                 "_apply_uploaded_attachment_retargeting: rewrote %d frame "
-                "image kind(s) per classifier instruction", retargeted,
+                "image frame_type(s) per classifier instruction", retargeted,
             )
 
     async def _materialise_frame_plan(
