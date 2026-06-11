@@ -105,6 +105,23 @@ class TestDowngradeUserFacingMessages:
         msg = _user_facing_downgrade_message("")
         assert "non-critical" in msg.lower()
 
+    def test_middle_embedded_index_maps_to_curated_message(self):
+        """Codes with the index in the MIDDLE (e.g. prior_video_index_0_unresolvable)
+        must resolve to their curated message, not fall back to the generic one."""
+        msg = _user_facing_downgrade_message("prior_video_index_0_unresolvable")
+        assert msg == "Referenced previous video not found."
+        # trailing-index form still works (no regression)
+        msg2 = _user_facing_downgrade_message("prior_video_index_12_unresolvable")
+        assert msg2 == "Referenced previous video not found."
+
+    def test_frame_past_eof_code_maps_to_curated_message(self):
+        """The frame-extraction end-seek fallback emits the coded note
+        frame_past_eof_used_last_frame; it must map to a specific message,
+        not the generic fallback."""
+        msg = _user_facing_downgrade_message("frame_past_eof_used_last_frame")
+        assert msg != "A non-critical step was skipped."
+        assert "last frame" in msg.lower()
+
     def test_disclosure_block_uses_user_facing_messages(self):
         intent = VideoIntentResult(
             intent="modify_prior_video",

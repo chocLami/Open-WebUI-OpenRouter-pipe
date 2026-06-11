@@ -914,6 +914,9 @@ def _make_default_invoke(
 
 _DOWNGRADE_USER_MESSAGES: dict[str, str] = {
     "frame_extract_failed": "Could not extract frame from previous video.",
+    "frame_past_eof_used_last_frame": (
+        "The requested time was past the end of the previous video; used its last frame instead."
+    ),
     "prior_video_download_failed": "Previous video could not be loaded.",
     "prior_video_index_unresolvable": "Referenced previous video not found.",
     "prior_video_unauthorized": "Cannot access referenced video (different user).",
@@ -929,13 +932,20 @@ _DOWNGRADE_USER_MESSAGES: dict[str, str] = {
 def _user_facing_downgrade_message(code: str) -> str:
     """Map an internal downgrade code to a user-friendly message.
 
-    Strips the optional `_idx_N` / `_*` suffix and looks up the base code.
+    Strips every numeric `_<N>` segment (whether trailing, e.g.
+    `frame_extract_failed_idx_3`, or embedded, e.g.
+    `prior_video_index_0_unresolvable`) and looks up the base code.
     Falls back to a generic message — never echoes raw exception text.
     """
     if not isinstance(code, str) or not code:
         return "A non-critical step was skipped."
+    # Codes embed a numeric index either as a trailing suffix
+    # (e.g. "frame_extract_failed_idx_3") or in the MIDDLE
+    # (e.g. "prior_video_index_0_unresolvable"). A plain startswith misses the
+    # middle case, so strip the numeric segments before matching the base keys.
+    normalized = re.sub(r"_\d+", "", code)
     for prefix in _DOWNGRADE_USER_MESSAGES:
-        if code.startswith(prefix):
+        if normalized.startswith(prefix):
             return _DOWNGRADE_USER_MESSAGES[prefix]
     return "A non-critical step was skipped."
 
