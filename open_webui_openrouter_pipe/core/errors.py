@@ -217,8 +217,11 @@ def _classify_retryable_http_error(
 def _extract_openrouter_error_details(body_text: Optional[str]) -> dict[str, Any]:
     """Normalize OpenRouter error payloads into structured metadata."""
     parsed = _safe_json_loads(body_text) if body_text else None
-    error_section = parsed.get("error", {}) if isinstance(parsed, dict) else {}
-    metadata = error_section.get("metadata", {}) if isinstance(error_section, dict) else {}
+    raw_error_section = parsed.get("error", {}) if isinstance(parsed, dict) else {}
+    # The top-level `error` value may itself be a non-dict (string/list/null);
+    # coerce once so every `.get()` below is safe.
+    error_section = raw_error_section if isinstance(raw_error_section, dict) else {}
+    metadata = error_section.get("metadata", {})
     metadata_dict = metadata if isinstance(metadata, dict) else {}
 
     raw_meta = metadata_dict.get("raw")
@@ -238,7 +241,7 @@ def _extract_openrouter_error_details(body_text: Optional[str]) -> dict[str, Any
     upstream_type = upstream_error.get("type") if isinstance(upstream_error, dict) else None
 
     request_id = (
-        metadata.get("request_id")
+        metadata_dict.get("request_id")
         or (raw_details.get("request_id") if isinstance(raw_details, dict) else None)
         or (parsed.get("request_id") if isinstance(parsed, dict) else None)
     )

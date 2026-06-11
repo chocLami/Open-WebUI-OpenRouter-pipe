@@ -1377,6 +1377,32 @@ def test_extract_openrouter_error_details_and_builder():
     assert error.requested_model == "demo"
 
 
+def test_extract_openrouter_error_details_non_dict_metadata():
+    """error.metadata may be a non-dict (string/list/number) from some upstreams;
+    request_id extraction must not crash on it."""
+    for bad_metadata in ["just a string", ["a", "b"], 42]:
+        payload = json.dumps({"error": {"message": "x", "code": 429, "metadata": bad_metadata}})
+        details = ow._extract_openrouter_error_details(payload)  # must not raise
+        assert details["request_id"] is None
+        # the builder wraps the same path — must not raise either
+        err = ow._build_openrouter_api_error(429, "Rate limited", payload, requested_model="demo")
+        assert isinstance(err, ow.OpenRouterAPIError)
+
+
+def test_extract_openrouter_error_details_non_dict_error_section():
+    """The top-level `error` value may itself be a non-dict (string/list/null);
+    message/code/metadata extraction must not crash on it."""
+    for bad_error in ["bad", ["a", "b"], 42, None]:
+        payload = json.dumps({"error": bad_error})
+        details = ow._extract_openrouter_error_details(payload)  # must not raise
+        assert details["openrouter_message"] is None
+        assert details["openrouter_code"] is None
+        assert details["metadata"] == {}
+        # the builder wraps the same path — must not raise either
+        err = ow._build_openrouter_api_error(400, "Bad request", payload, requested_model="demo")
+        assert isinstance(err, ow.OpenRouterAPIError)
+
+
 def test_resolve_error_model_context_and_to_markdown(monkeypatch):
     ow.ModelFamily.set_dynamic_specs({
         "demo": {
