@@ -115,9 +115,18 @@ class ToolExecutor:
             return raw_args
         if isinstance(raw_args, str):
             try:
-                return json.loads(raw_args)
+                parsed = json.loads(raw_args)
             except json.JSONDecodeError as exc:
                 raise ValueError("Unable to parse tool arguments") from exc
+            # json.loads can yield null/scalar/list; the contract (and every
+            # caller, e.g. _is_batchable_tool_call) requires a dict. Reject
+            # non-objects here so the caller's handler turns it into a clean
+            # tool error instead of a TypeError that poisons the whole batch.
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    f"Tool arguments must be a JSON object, got {type(parsed).__name__}"
+                )
+            return parsed
         raise ValueError(f"Unsupported argument type: {type(raw_args).__name__}")
 
     @timed

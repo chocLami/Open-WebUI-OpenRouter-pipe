@@ -2936,6 +2936,13 @@ class TestParseToolArguments:
             # None raises ValueError
             with pytest.raises(ValueError, match="Unsupported argument type"):
                 executor._parse_tool_arguments(None)
+
+            # Valid JSON that isn't an object (null/scalar/list) must raise
+            # ValueError, not return a non-dict that crashes downstream
+            # (_is_batchable_tool_call does `key in args`).
+            for non_object in ["null", "42", '"hi"', "[1, 2]"]:
+                with pytest.raises(ValueError, match="must be a JSON object"):
+                    executor._parse_tool_arguments(non_object)
         finally:
             pipe.shutdown()
 
