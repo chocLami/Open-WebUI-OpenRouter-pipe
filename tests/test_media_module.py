@@ -220,6 +220,70 @@ class TestExtractFrame:
             )
 
     @pytest.mark.asyncio
+    async def test_last_frame_when_probe_fails_uses_end_seek(self, synthetic_mp4, monkeypatch):
+        """When probe_video fails (no duration), last_frame must still extract a
+        real frame via end-seek — not fail with empty output from a bad -ss
+        sentinel past EOF."""
+        import open_webui_openrouter_pipe.media.frame_extraction as fe
+
+        async def _failing_probe(_path):
+            raise FrameExtractionError("probe failed")
+
+        monkeypatch.setattr(fe, "probe_video", _failing_probe)
+        frame = await extract_frame(
+            synthetic_mp4, target="last_frame", logger=logging.getLogger("test"),
+        )
+        assert len(frame.image_bytes) > 0
+
+    @pytest.mark.asyncio
+    async def test_at_timestamp_past_last_frame_within_duration(self, synthetic_mp4):
+        """A timestamp within the reported duration but at/past the last frame's
+        PTS must still return a frame (falls back to the last frame) rather than
+        raising empty-output."""
+        meta = await probe_video(synthetic_mp4)
+        ts = max(0.0, meta.duration_seconds - 0.001)
+        frame = await extract_frame(
+            synthetic_mp4, target="at_timestamp", timestamp_seconds=ts,
+            logger=logging.getLogger("test"),
+        )
+        assert len(frame.image_bytes) > 0
+
+    @pytest.mark.asyncio
+    async def test_at_timestamp_nonzero_exit_falls_back_to_last_frame(self, synthetic_mp4, monkeypatch):
+        """A past-EOF seek can also fail with a NON-ZERO ffmpeg exit code (not
+        just exit-0 empty output); that failure mode must equally fall back to
+        the end-seek last frame, report the true last-frame timestamp, and emit
+        a coded downgrade note instead of prose."""
+        import open_webui_openrouter_pipe.media.frame_extraction as fe
+
+        meta = await probe_video(synthetic_mp4)
+        ts = max(0.0, meta.duration_seconds - 0.001)
+        real_ffmpeg = fe._extract_frame_ffmpeg
+        calls: list[bool] = []
+
+        async def _scripted_ffmpeg(path, *, timestamp_seconds, logger, from_end=False):
+            calls.append(from_end)
+            if not from_end:
+                raise FrameExtractionError(
+                    "ffmpeg returned 1: Output file is empty", no_frame=True,
+                )
+            return await real_ffmpeg(
+                path, timestamp_seconds=timestamp_seconds, logger=logger, from_end=True,
+            )
+
+        monkeypatch.setattr(fe, "_extract_frame_ffmpeg", _scripted_ffmpeg)
+        frame = await extract_frame(
+            synthetic_mp4, target="at_timestamp", timestamp_seconds=ts,
+            logger=logging.getLogger("test"),
+        )
+        assert calls == [False, True], "must retry exactly once with from_end=True"
+        assert len(frame.image_bytes) > 0
+        assert frame.downgrade_note == "frame_past_eof_used_last_frame"
+        expected_last = max(0.0, meta.duration_seconds - max(1.0 / meta.fps, 0.04))
+        assert frame.actual_timestamp_seconds == pytest.approx(expected_last, abs=0.05)
+        assert frame.requested_timestamp_seconds == pytest.approx(ts, abs=1e-6)
+
+    @pytest.mark.asyncio
     async def test_negative_timestamp_raises(self, synthetic_mp4):
         with pytest.raises(FrameExtractionError):
             await extract_frame(

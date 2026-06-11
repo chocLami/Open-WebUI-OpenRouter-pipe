@@ -24,7 +24,16 @@ _FFMPEG_TIMEOUT_S = 30.0
 
 
 class FrameExtractionError(Exception):
-    """Raised when a frame cannot be extracted from a video file."""
+    """Raised when a frame cannot be extracted from a video file.
+
+    ``no_frame=True`` marks failures where ffmpeg ran but produced no frame
+    (non-zero exit or empty output) — the modes a seek past the last decodable
+    frame causes, where an end-seek fallback may still succeed.
+    """
+
+    def __init__(self, message: str, *, no_frame: bool = False) -> None:
+        super().__init__(message)
+        self.no_frame = no_frame
 
 
 @dataclass
@@ -114,7 +123,8 @@ def _extract_frame_imageio_sync(
 
 
 async def _extract_frame_ffmpeg(
-    path: Path, *, timestamp_seconds: float, logger: logging.Logger
+    path: Path, *, timestamp_seconds: float, logger: logging.Logger,
+    from_end: bool = False
 ) -> tuple[bytes, int, int]:
     """Fallback frame extraction via ffmpeg subprocess.
 
@@ -136,13 +146,22 @@ async def _extract_frame_ffmpeg(
         except Exception as exc:
             raise FrameExtractionError(f"ffmpeg unavailable: {exc}") from exc
 
+    if from_end:
+        # Input-seeking with -ss past the last frame returns 0 bytes, so to grab
+        # the true last frame we seek a short window before EOF, scale, then
+        # reverse it — frame 1 of the reversed tail is the last decodable frame.
+        seek_args = ["-sseof", "-1"]
+        vf = "scale='min(1920,iw)':-2,reverse"
+    else:
+        seek_args = ["-ss", str(max(0.0, timestamp_seconds))]
+        vf = "scale='min(1920,iw)':-2"
     cmd = [
         ffmpeg_bin,
         "-protocol_whitelist", "file",
-        "-ss", str(max(0.0, timestamp_seconds)),
+        *seek_args,
         "-i", path_str,
         "-frames:v", "1",
-        "-vf", "scale='min(1920,iw)':-2",
+        "-vf", vf,
         "-f", "image2pipe",
         "-vcodec", "png",
         "-loglevel", "error",
@@ -168,10 +187,11 @@ async def _extract_frame_ffmpeg(
             ) from None
         if proc.returncode != 0:
             raise FrameExtractionError(
-                f"ffmpeg returned {proc.returncode}: {stderr.decode('utf-8', errors='replace')[:200]}"
+                f"ffmpeg returned {proc.returncode}: {stderr.decode('utf-8', errors='replace')[:200]}",
+                no_frame=True,
             )
         if not stdout:
-            raise FrameExtractionError("ffmpeg produced empty output")
+            raise FrameExtractionError("ffmpeg produced empty output", no_frame=True)
         img = Image.open(io.BytesIO(stdout))
         img.load()
         if img.width * img.height > _MAX_FRAME_PIXELS:
@@ -221,6 +241,8 @@ async def extract_frame(
 
     downgrade_note = ""
     requested_ts = timestamp_seconds if target == "at_timestamp" else None
+    use_end_seek = False
+    meta: Optional[VideoMetadata] = None
 
     if target == "first_frame":
         actual_ts = 0.0
@@ -233,7 +255,11 @@ async def extract_frame(
             if meta and meta.duration_seconds > 0:
                 actual_ts = max(0.0, meta.duration_seconds - max(1.0 / meta.fps, 0.04))
             else:
-                actual_ts = 9_999_999.0  # sentinel — ffmpeg clamps to last frame
+                # No probe -> can't compute a duration-based timestamp. Input
+                # seeking past EOF returns 0 bytes, so seek from the end instead
+                # (an -ss sentinel would just produce an empty frame and fail).
+                actual_ts = 0.0
+                use_end_seek = True
         else:
             assert timestamp_seconds is not None
             if meta and timestamp_seconds > meta.duration_seconds:
@@ -272,9 +298,30 @@ async def extract_frame(
         except FrameExtractionError as exc:
             logger.debug("imageio first_frame failed; falling through to ffmpeg: %s", exc)
 
-    png_bytes, w, h = await _extract_frame_ffmpeg(
-        path, timestamp_seconds=actual_ts, logger=logger,
-    )
+    try:
+        png_bytes, w, h = await _extract_frame_ffmpeg(
+            path, timestamp_seconds=actual_ts, logger=logger, from_end=use_end_seek,
+        )
+    except FrameExtractionError as exc:
+        # A timestamp within the reported duration can still land past the last
+        # decodable frame (the final inter-frame gap). ffmpeg then fails with
+        # either exit-0 empty output OR a non-zero exit — both marked no_frame.
+        # Fall back to the true last frame via end-seek instead of failing.
+        if use_end_seek or target == "first_frame" or not exc.no_frame:
+            raise
+        logger.debug(
+            "ffmpeg seek to %.3fs produced no frame; falling back to last frame", actual_ts,
+        )
+        png_bytes, w, h = await _extract_frame_ffmpeg(
+            path, timestamp_seconds=0.0, logger=logger, from_end=True,
+        )
+        use_end_seek = True
+        if meta is not None and meta.duration_seconds > 0:
+            # Report the true last-frame timestamp, not the overshot request.
+            actual_ts = max(0.0, meta.duration_seconds - max(1.0 / meta.fps, 0.04))
+        if not downgrade_note:
+            # Coded key (not prose) so _user_facing_downgrade_message can map it.
+            downgrade_note = "frame_past_eof_used_last_frame"
     return ExtractedFrame(
         image_bytes=png_bytes, width=w, height=h,
         actual_timestamp_seconds=actual_ts,
