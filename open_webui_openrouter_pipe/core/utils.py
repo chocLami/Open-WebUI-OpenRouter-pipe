@@ -40,6 +40,20 @@ _CROCKFORD_SET = frozenset(CROCKFORD_ALPHABET)
 _PHASE_MARKER_RE = re.compile(r"^\[P:([a-z_]+)\]: #$")
 _PHASE_MARKER_VALUES = frozenset({"commentary", "final_answer", "null"})
 
+# Internal ordering anchors stamped on a persisted reasoning payload so replay
+# can restore reasoning to its true position relative to tool calls. The value
+# is the call's ORDINAL within the assistant turn (0,1,2...), which is unique
+# even when a provider reuses call_ids across rounds. These keys are stripped
+# from the reasoning block before it is sent to the provider.
+REASONING_ANCHOR_SEQ_KEY = "_anchor_seq"
+REASONING_FOLLOWING_ORDINAL_KEY = "_anchor_following_call_ordinal"
+REASONING_PRECEDING_ORDINAL_KEY = "_anchor_preceding_call_ordinal"
+REASONING_ANCHOR_KEYS = (
+    REASONING_ANCHOR_SEQ_KEY,
+    REASONING_FOLLOWING_ORDINAL_KEY,
+    REASONING_PRECEDING_ORDINAL_KEY,
+)
+
 # -----------------------------------------------------------------------------
 # Stable IDs (for cross-worker locks)
 # -----------------------------------------------------------------------------

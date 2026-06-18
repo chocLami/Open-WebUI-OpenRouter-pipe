@@ -31,6 +31,10 @@ from ..core.utils import (
     strip_hidden_marker_lines,
     split_text_by_phase_markers,
     split_text_by_markers,
+    REASONING_ANCHOR_KEYS,
+    REASONING_ANCHOR_SEQ_KEY,
+    REASONING_FOLLOWING_ORDINAL_KEY,
+    REASONING_PRECEDING_ORDINAL_KEY,
 )
 
 # Import from storage
@@ -65,6 +69,126 @@ if TYPE_CHECKING:
 _TOOL_OUTPUT_PRUNE_MIN_LENGTH = 800  # Minimum length before pruning is applied
 _TOOL_OUTPUT_PRUNE_HEAD_CHARS = 256  # Characters to keep from the beginning
 _TOOL_OUTPUT_PRUNE_TAIL_CHARS = 128  # Characters to keep from the end
+
+def _strip_reasoning_anchor_keys(item: dict[str, Any]) -> dict[str, Any]:
+    """Return *item* without the internal anchor keys used only for replay
+    ordering; they must never reach the provider on the reasoning block."""
+    if not any(k in item for k in REASONING_ANCHOR_KEYS):
+        return item
+    return {k: v for k, v in item.items() if k not in REASONING_ANCHOR_KEYS}
+
+
+def _reinterleave_region(region: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Re-interleave reasoning within one assistant turn using call ORDINALS.
+
+    Each reasoning carries the ordinal (0,1,2...) of the call it sits next to:
+    a following-ordinal block goes immediately before the Nth ``function_call``;
+    a preceding-ordinal block goes immediately after that call's OWN
+    ``function_call_output`` (matched by ``call_id`` so a missing/error output for
+    one call cannot shift another call's reasoning between a tool_use and its
+    tool_result). A call with no output (a failed/orphaned tool) places the block
+    immediately after the bare call, where the sanitizer's stub output then lands
+    between them -- keeping the reasoning after the result.
+    Ordinals are unique within the turn even when call_ids repeat across rounds.
+    Reasoning whose ordinal is out of range, or which has no anchor, is left in
+    place; nothing is dropped. Anchor keys are stripped from every item.
+    """
+    movable: list[tuple[int, dict[str, Any], str, int]] = []
+    skeleton: list[dict[str, Any]] = []
+    for it in region:
+        if isinstance(it, dict) and it.get("type") == "reasoning":
+            raw_seq = it.get(REASONING_ANCHOR_SEQ_KEY)
+            seq = raw_seq if isinstance(raw_seq, int) else 0
+            following = it.get(REASONING_FOLLOWING_ORDINAL_KEY)
+            preceding = it.get(REASONING_PRECEDING_ORDINAL_KEY)
+            stripped = _strip_reasoning_anchor_keys(it)
+            if isinstance(following, int):
+                movable.append((seq, stripped, "before", following))
+            elif isinstance(preceding, int):
+                movable.append((seq, stripped, "after", preceding))
+            else:
+                # No anchor: leave in place. Reasoning is never dropped, so
+                # genuinely-consecutive blocks (e.g. redacted_thinking +
+                # thinking in a no-tool turn) are preserved.
+                skeleton.append(stripped)
+        elif isinstance(it, dict):
+            skeleton.append(_strip_reasoning_anchor_keys(it))
+        else:
+            skeleton.append(it)
+
+    if not movable:
+        return skeleton
+
+    fc_items = [
+        (i, e) for i, e in enumerate(skeleton)
+        if isinstance(e, dict) and e.get("type") == "function_call"
+    ]
+    fco_items = [
+        (i, e) for i, e in enumerate(skeleton)
+        if isinstance(e, dict) and e.get("type") == "function_call_output"
+    ]
+    # Pair each call (by ordinal) to its own output index, consuming outputs in
+    # order by call_id. This survives missing/error outputs and repeated call_ids:
+    # the Nth output is not assumed to belong to the Nth call.
+    output_index_for_call: dict[int, int] = {}
+    remaining_outputs = list(fco_items)
+    for call_ordinal, (_, call_item) in enumerate(fc_items):
+        call_id = call_item.get("call_id")
+        for j, (fco_idx, fco_item) in enumerate(remaining_outputs):
+            if fco_item.get("call_id") == call_id:
+                output_index_for_call[call_ordinal] = fco_idx
+                remaining_outputs.pop(j)
+                break
+
+    inserts_before: dict[int, list[tuple[int, dict[str, Any]]]] = {}
+    inserts_after: dict[int, list[tuple[int, dict[str, Any]]]] = {}
+    for seq, item, mode, ordinal in sorted(movable, key=lambda a: a[0]):
+        pos: Optional[int] = None
+        if mode == "before":
+            if 0 <= ordinal < len(fc_items):
+                pos = fc_items[ordinal][0]
+            bucket = inserts_before
+        else:
+            if ordinal in output_index_for_call:
+                pos = output_index_for_call[ordinal]
+            elif 0 <= ordinal < len(fc_items):
+                pos = fc_items[ordinal][0]
+            bucket = inserts_after
+        if pos is None:
+            skeleton.append(item)  # ordinal out of range: keep, never drop
+            continue
+        bucket.setdefault(pos, []).append((seq, item))
+
+    rebuilt: list[dict[str, Any]] = []
+    for i, entry in enumerate(skeleton):
+        for _, ins in sorted(inserts_before.get(i, []), key=lambda a: a[0]):
+            rebuilt.append(ins)
+        rebuilt.append(entry)
+        for _, ins in sorted(inserts_after.get(i, []), key=lambda a: a[0]):
+            rebuilt.append(ins)
+    return rebuilt
+
+
+def _reinterleave_reasoning_by_anchor(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Re-interleave reasoning to its true generated position, scoped per assistant
+    turn. Turns are delimited by user messages so a reasoning anchor only binds to
+    a tool call within its own turn -- tool ``call_id`` values are not unique across
+    turns (the chat-completions adapter assigns index-based ids that repeat).
+    """
+    out: list[dict[str, Any]] = []
+    region: list[dict[str, Any]] = []
+    for it in items:
+        if isinstance(it, dict) and it.get("type") == "message" and it.get("role") == "user":
+            out.extend(_reinterleave_region(region))
+            region = []
+            out.append(it)
+        else:
+            region.append(it)
+    out.extend(_reinterleave_region(region))
+    return out
+
 
 async def transform_messages_to_input(
     pipe: "Pipe",
@@ -1517,6 +1641,8 @@ async def transform_messages_to_input(
                         "arguments": args_text,
                     }
                 )
+
+    openai_input = _reinterleave_reasoning_by_anchor(openai_input)
 
     _maybe_apply_anthropic_prompt_caching(
         openai_input,

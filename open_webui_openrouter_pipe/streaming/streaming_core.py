@@ -66,6 +66,9 @@ from ..core.utils import (
     _serialize_marker,
     _serialize_phase_marker,
     _safe_json_loads,
+    REASONING_ANCHOR_SEQ_KEY,
+    REASONING_FOLLOWING_ORDINAL_KEY,
+    REASONING_PRECEDING_ORDINAL_KEY,
 )
 # Imports from models.registry
 from ..models.registry import (
@@ -426,6 +429,12 @@ class StreamingHandler:
         if session is None:
             raise RuntimeError("HTTP session is required for streaming")
 
+        # The streaming emitter wrapper passes a missing emitter through as None,
+        # so normalize to a no-op here: the loop emits at many sites and most are
+        # unguarded, and a None emitter would crash mid-stream on the first delta.
+        if event_emitter is None:
+            event_emitter = _wrap_event_emitter(None)
+
         if not isinstance(metadata, dict):
             metadata = {}
 
@@ -489,6 +498,12 @@ class StreamingHandler:
         assistant_len_before_tool_loops = len(assistant_message)
         pending_ulids: list[str] = []
         pending_items: list[dict[str, Any]] = []
+        reasoning_anchor_state: dict[str, Any] = {
+            "seq": 0,
+            "calls_seen": 0,
+            "stream_calls": 0,
+            "awaiting": [],
+        }
         total_usage: dict[str, Any] = {}
         reasoning_buffer = ""
         reasoning_completed_emitted = False
@@ -1499,6 +1514,10 @@ class StreamingHandler:
                         elif item_type == "function_call":
                             # Defer persistence until the corresponding tool result is stored
                             should_persist = False
+                            # Count calls in stream (generation) order so reasoning
+                            # can be sided relative to them -- this fires whether or
+                            # not the tool later succeeds or fails.
+                            reasoning_anchor_state["stream_calls"] += 1
 
                         else:
                             should_persist = persist_tools_enabled
@@ -1506,6 +1525,20 @@ class StreamingHandler:
                         if should_persist:
                             normalized_item = normalize_persisted_item(item)
                             if normalized_item:
+                                if item_type == "reasoning":
+                                    normalized_item[REASONING_ANCHOR_SEQ_KEY] = reasoning_anchor_state["seq"]
+                                    reasoning_anchor_state["seq"] += 1
+                                    # Defer the call-ordinal anchor to response.completed.
+                                    # Pair the payload with how many calls preceded it in
+                                    # the stream -- kept in this side list, NOT on the
+                                    # payload, so no scratch key can ever be persisted if
+                                    # the stream ends before the anchor is derived.
+                                    reasoning_anchor_state["awaiting"].append(
+                                        (normalized_item, reasoning_anchor_state["stream_calls"])
+                                    )
+                                # NOTE: _make_db_row stores this payload BY REFERENCE
+                                # (persistence.py), so the anchor back-filled at
+                                # response.completed reaches the persisted row before flush.
                                 row = self._pipe._artifact_store._make_db_row(
                                     chat_id, message_id, openwebui_model, normalized_item
                                 )
@@ -1990,6 +2023,74 @@ class StreamingHandler:
                                 "Failed to normalize tool error output for call_id=%s",
                                 call_id,
                             )
+
+                # Derive each pending reasoning's ordering anchor from this
+                # response's output order. The anchor is the call's ORDINAL within
+                # the assistant turn (0,1,2...), which stays unique even when a
+                # provider reuses call_ids across rounds. Pending reasoning and the
+                # output's reasoning items are both in generation order, so they
+                # are matched by item id (the robust key, present on both the
+                # stream and the completed output), falling back to position for
+                # id-less items. Pending reasoning the output did NOT echo is sided
+                # by how many calls preceded it in the stream (when that count is
+                # trustworthy), then by the round's call context -- never dropped.
+                _ordered = final_response.get("output", [])
+                _fc_local = [
+                    _j for _j, _o in enumerate(_ordered)
+                    if isinstance(_o, dict) and _o.get("type") == "function_call"
+                ]
+                _calls_seen = reasoning_anchor_state["calls_seen"]
+                _derived: list[tuple[str, int]] = []
+                _derived_by_id: dict[str, tuple[str, int]] = {}
+                for _i, _o in enumerate(_ordered):
+                    if not (isinstance(_o, dict) and _o.get("type") == "reasoning"):
+                        continue
+                    _next = next((_m for _m, _p in enumerate(_fc_local) if _p > _i), None)
+                    if _next is not None:
+                        _entry = ("following", _calls_seen + _next)
+                    else:
+                        _prevs = [_m for _m, _p in enumerate(_fc_local) if _p < _i]
+                        if _prevs:
+                            _entry = ("preceding", _calls_seen + _prevs[-1])
+                        elif _calls_seen > 0:
+                            _entry = ("preceding", _calls_seen - 1)
+                        else:
+                            _entry = ("", -1)  # no call context yet; leave un-anchored
+                    _derived.append(_entry)
+                    _rid = _o.get("id")
+                    if _rid:
+                        _derived_by_id[_rid] = _entry
+                # The stream call count is only trustworthy when it matches the
+                # authoritative count from the completed output; when it does, an
+                # un-echoed reasoning is sided by how many calls preceded it.
+                _stream_total = reasoning_anchor_state["stream_calls"]
+                _stream_consistent = _stream_total == _calls_seen + len(_fc_local)
+                for _idx, (_pending_reasoning, _stream_pos) in enumerate(reasoning_anchor_state["awaiting"]):
+                    _pending_id = _pending_reasoning.get("id")
+                    if _pending_id and _pending_id in _derived_by_id:
+                        _mode, _ordinal = _derived_by_id[_pending_id]
+                    elif _stream_consistent and isinstance(_stream_pos, int):
+                        if _stream_pos < _stream_total:
+                            _mode, _ordinal = "following", _stream_pos
+                        elif _stream_pos > 0:
+                            _mode, _ordinal = "preceding", _stream_pos - 1
+                        else:
+                            _mode, _ordinal = "", -1
+                    elif _idx < len(_derived):
+                        _mode, _ordinal = _derived[_idx]
+                    elif _calls_seen > 0:
+                        # Un-echoed and the stream count is unreliable: anchor after the
+                        # last known call rather than guessing it precedes one (a wrong
+                        # "following" guess could collapse it onto a real pre-call block).
+                        _mode, _ordinal = "preceding", _calls_seen - 1
+                    else:
+                        _mode, _ordinal = "", -1
+                    if _mode == "following":
+                        _pending_reasoning[REASONING_FOLLOWING_ORDINAL_KEY] = _ordinal
+                    elif _mode == "preceding":
+                        _pending_reasoning[REASONING_PRECEDING_ORDINAL_KEY] = _ordinal
+                reasoning_anchor_state["awaiting"] = []
+                reasoning_anchor_state["calls_seen"] = _calls_seen + len(_fc_local)
 
                 if (call_items or invalid_call_outputs) and not owui_tool_passthrough:
                     note_model_activity()  # Cancel thinking tasks when function calls begin

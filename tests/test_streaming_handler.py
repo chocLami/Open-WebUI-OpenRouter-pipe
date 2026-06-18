@@ -3717,6 +3717,377 @@ class TestLoopLimitAndFunctionExecution:
             if isinstance(item, dict)
         ] == ["reasoning", "function_call", "message", "function_call_output"]
 
+    @pytest.mark.asyncio
+    async def test_reasoning_persist_stamps_ordering_anchors(self, monkeypatch, pipe_instance_async):
+        """Reasoning persisted around a tool round is stamped with call_id ordering
+        anchors so replay can re-interleave it: pre-tool reasoning gets
+        the call ordinal it follows; post-tool reasoning gets the ordinal it
+        follows (preceding). Ordinals are derived from the model's output order."""
+        pipe = pipe_instance_async
+        body = ResponsesBody(model="test/model", input=[], stream=True)
+        valves = pipe.valves.model_copy(update={
+            "TOOL_EXECUTION_MODE": "Pipeline",
+            "MAX_FUNCTION_CALL_LOOPS": 2,
+            "PERSIST_REASONING_TOKENS": "conversation",
+        })
+
+        call_count = [0]
+
+        async def streaming(self, session, request_body, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                yield {"type": "response.output_item.done", "item": {
+                    "id": "rs-1", "type": "reasoning", "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": "plan"}],
+                    "summary": [], "signature": "SIG_PLAN",
+                }}
+                yield {"type": "response.completed", "response": {"output": [
+                    {"type": "reasoning", "id": "rs-1",
+                     "content": [{"type": "reasoning_text", "text": "plan"}],
+                     "signature": "SIG_PLAN"},
+                    {"type": "function_call", "call_id": "toolu-A",
+                     "name": "get_weather", "arguments": "{}"},
+                    {"type": "message", "role": "assistant", "content": "calling"},
+                ], "usage": {}}}
+            else:
+                yield {"type": "response.output_item.done", "item": {
+                    "id": "rs-2", "type": "reasoning", "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": "synth"}],
+                    "summary": [], "signature": "SIG_REFLECT",
+                }}
+                yield {"type": "response.output_text.delta", "delta": "Final"}
+                yield {"type": "response.completed", "response": {"output": [], "usage": {}}}
+
+        async def mock_execute(calls, registry):
+            return [{"type": "function_call_output", "call_id": "toolu-A", "output": "sunny"}]
+
+        captured_rows: list[dict] = []
+
+        def fake_make_db_row(chat_id, message_id, model_id, payload):
+            row = {"chat_id": chat_id, "message_id": message_id, "model_id": model_id,
+                   "item_type": payload.get("type"), "payload": payload}
+            captured_rows.append(row)
+            return row
+
+        async def fake_db_persist(rows):
+            return [f"ulid-{i}" for i in range(len(rows))]
+
+        monkeypatch.setattr(Pipe, "send_openrouter_streaming_request", streaming)
+        monkeypatch.setattr(pipe._ensure_tool_executor(), "_execute_function_calls", mock_execute)
+        monkeypatch.setattr(pipe._artifact_store, "_make_db_row", fake_make_db_row)
+        monkeypatch.setattr(pipe._artifact_store, "_db_persist", fake_db_persist)
+
+        await pipe._streaming_handler._run_streaming_loop(
+            body, valves, None,
+            metadata={"model": {"id": "test"}, "chat_id": "chat-1", "message_id": "msg-1"},
+            tools={"get_weather": {"callable": lambda **_kw: "ok"}},
+            session=cast(Any, object()), user_id="user-1",
+        )
+
+        reasoning_payloads = [r["payload"] for r in captured_rows if r["item_type"] == "reasoning"]
+        assert len(reasoning_payloads) == 2, f"expected 2 reasoning rows, got {captured_rows}"
+        by_text = {
+            (p.get("content") or [{}])[0].get("text", ""): p for p in reasoning_payloads
+        }
+        plan = by_text.get("plan")
+        synth = by_text.get("synth")
+        assert plan is not None and synth is not None, f"reasoning payloads: {reasoning_payloads}"
+        # pre-tool reasoning anchors to the round's first call (back-filled);
+        # post-tool reasoning anchors to the preceding call (immediate).
+        assert plan.get("_anchor_following_call_ordinal") == 0, f"plan anchors: {plan}"
+        assert synth.get("_anchor_preceding_call_ordinal") == 0, f"synth anchors: {synth}"
+        assert plan.get("_anchor_seq") == 0
+        assert synth.get("_anchor_seq") == 1
+
+    @pytest.mark.asyncio
+    async def test_reasoning_anchor_per_call_in_multi_call_round(self, monkeypatch, pipe_instance_async):
+        """Reasoning emitted between two tool calls in ONE response anchors to the
+        call that actually follows it, not the round's first call."""
+        pipe = pipe_instance_async
+        body = ResponsesBody(model="test/model", input=[], stream=True)
+        valves = pipe.valves.model_copy(update={
+            "TOOL_EXECUTION_MODE": "Pipeline", "MAX_FUNCTION_CALL_LOOPS": 2,
+            "PERSIST_REASONING_TOKENS": "conversation",
+        })
+        call_count = [0]
+
+        async def streaming(self, session, request_body, **_k):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                yield {"type": "response.output_item.done", "item": {
+                    "id": "rs-1", "type": "reasoning", "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": "before A"}],
+                    "summary": [], "signature": "S1"}}
+                yield {"type": "response.output_item.done", "item": {
+                    "id": "rs-2", "type": "reasoning", "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": "between A and B"}],
+                    "summary": [], "signature": "S2"}}
+                yield {"type": "response.completed", "response": {"output": [
+                    {"type": "reasoning", "id": "rs-1",
+                     "content": [{"type": "reasoning_text", "text": "before A"}], "signature": "S1"},
+                    {"type": "function_call", "call_id": "callA", "name": "f", "arguments": "{}"},
+                    {"type": "reasoning", "id": "rs-2",
+                     "content": [{"type": "reasoning_text", "text": "between A and B"}], "signature": "S2"},
+                    {"type": "function_call", "call_id": "callB", "name": "g", "arguments": "{}"},
+                ], "usage": {}}}
+            else:
+                yield {"type": "response.completed", "response": {"output": [], "usage": {}}}
+
+        async def mock_exec(calls, registry):
+            return [{"type": "function_call_output", "call_id": c.get("call_id"), "output": "r"}
+                    for c in calls]
+
+        captured: list[dict] = []
+
+        def fake_row(chat_id, message_id, model_id, payload):
+            row = {"item_type": payload.get("type"), "payload": payload}
+            captured.append(row)
+            return row
+
+        async def fake_persist(rows):
+            return [f"u{i}" for i in range(len(rows))]
+
+        monkeypatch.setattr(Pipe, "send_openrouter_streaming_request", streaming)
+        monkeypatch.setattr(pipe._ensure_tool_executor(), "_execute_function_calls", mock_exec)
+        monkeypatch.setattr(pipe._artifact_store, "_make_db_row", fake_row)
+        monkeypatch.setattr(pipe._artifact_store, "_db_persist", fake_persist)
+
+        await pipe._streaming_handler._run_streaming_loop(
+            body, valves, None,
+            metadata={"model": {"id": "t"}, "chat_id": "c", "message_id": "m"},
+            tools={"f": {"callable": lambda **_k: "ok"}, "g": {"callable": lambda **_k: "ok"}},
+            session=cast(Any, object()), user_id="u",
+        )
+
+        by_text = {
+            (p["payload"].get("content") or [{}])[0].get("text", ""): p["payload"]
+            for p in captured if p["item_type"] == "reasoning"
+        }
+        # "before A" precedes the 1st call (ordinal 0); "between A and B" precedes
+        # the 2nd call (ordinal 1) -- not collapsed onto the round's first call.
+        assert by_text["before A"].get("_anchor_following_call_ordinal") == 0, by_text
+        assert by_text["between A and B"].get("_anchor_following_call_ordinal") == 1, by_text
+
+    def test_make_db_row_stores_payload_by_reference(self, pipe_instance):
+        """The ordinal back-fill mutates the reasoning payload AFTER `_make_db_row`
+        has queued it -- which only works because `_make_db_row` stores the payload
+        BY REFERENCE. Pin that cross-module contract so a future defensive copy in
+        persistence cannot silently drop the anchor and resurface the 400."""
+        store = pipe_instance._artifact_store
+        store._item_model = object()  # satisfy the guard without a real DB
+        payload = {"type": "reasoning", "content": [], "summary": []}
+        row = store._make_db_row("chat-1", "msg-1", "model", payload)
+        assert row is not None and row["payload"] is payload, "payload not stored by reference"
+        # Simulate the response.completed back-fill mutating the already-queued payload:
+        payload["_anchor_following_call_ordinal"] = 2
+        assert row["payload"]["_anchor_following_call_ordinal"] == 2
+
+    @pytest.mark.asyncio
+    async def test_none_emitter_does_not_crash_loop_on_text_delta(self, monkeypatch, pipe_instance_async):
+        """Regression: a None event emitter must not crash the loop. The streaming
+        wrapper passes a missing emitter through as None, the loop emits text deltas
+        unguarded, and the outer handler SWALLOWS the resulting TypeError -- so the
+        return value looks normal either way. We detect the regression by spying on
+        the error handler and asserting it was never reached."""
+        pipe = pipe_instance_async
+        body = ResponsesBody(model="test/model", input=[], stream=True)
+        valves = pipe.valves.model_copy(update={
+            "TOOL_EXECUTION_MODE": "Pipeline", "MAX_FUNCTION_CALL_LOOPS": 2})
+
+        async def streaming(self, session, request_body, **_k):
+            yield {"type": "response.output_text.delta", "delta": "hello world"}
+            yield {"type": "response.completed", "response": {"output": [], "usage": {}}}
+
+        swallowed: list[str] = []
+
+        async def spy_error(*_a, **_k):
+            swallowed.append(str(_k.get("log_message", "error")))
+
+        async def fake_persist(rows):
+            return [f"u{i}" for i in range(len(rows))]
+
+        monkeypatch.setattr(Pipe, "send_openrouter_streaming_request", streaming)
+        monkeypatch.setattr(pipe._ensure_error_formatter(), "_emit_templated_error", spy_error)
+        monkeypatch.setattr(pipe._artifact_store, "_db_persist", fake_persist)
+
+        result = await pipe._streaming_handler._run_streaming_loop(
+            body, valves, None,
+            metadata={"model": {"id": "test"}, "chat_id": "c", "message_id": "m"},
+            tools=None, session=cast(Any, object()), user_id="u",
+        )
+        assert not swallowed, f"loop swallowed an error (None-emitter crash regressed): {swallowed}"
+        assert result == "hello world", f"loop did not return streamed text: {result!r}"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_after_call_in_same_response_anchored_preceding(self, monkeypatch, pipe_instance_async):
+        """Reasoning emitted AFTER a tool call within the SAME response anchors as
+        'preceding' that call's ordinal -- exercising the post-call derivation
+        branch end to end through the real streaming loop."""
+        pipe = pipe_instance_async
+        body = ResponsesBody(model="test/model", input=[], stream=True)
+        valves = pipe.valves.model_copy(update={
+            "TOOL_EXECUTION_MODE": "Pipeline", "MAX_FUNCTION_CALL_LOOPS": 2,
+            "PERSIST_REASONING_TOKENS": "conversation",
+        })
+        call_count = [0]
+
+        async def streaming(self, session, request_body, **_k):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                yield {"type": "response.output_item.done", "item": {
+                    "id": "rs-pre", "type": "reasoning", "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": "pre"}], "summary": [], "signature": "S1"}}
+                yield {"type": "response.output_item.done", "item": {
+                    "id": "rs-post", "type": "reasoning", "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": "post"}], "summary": [], "signature": "S2"}}
+                yield {"type": "response.completed", "response": {"output": [
+                    {"type": "reasoning", "id": "rs-pre",
+                     "content": [{"type": "reasoning_text", "text": "pre"}], "signature": "S1"},
+                    {"type": "function_call", "call_id": "callA", "name": "f", "arguments": "{}"},
+                    {"type": "reasoning", "id": "rs-post",
+                     "content": [{"type": "reasoning_text", "text": "post"}], "signature": "S2"},
+                ], "usage": {}}}
+            else:
+                yield {"type": "response.output_text.delta", "delta": "done"}
+                yield {"type": "response.completed", "response": {"output": [], "usage": {}}}
+
+        async def mock_execute(calls, registry):
+            return [{"type": "function_call_output", "call_id": "callA", "output": "out"}]
+
+        captured: list[dict] = []
+
+        def fake_row(chat_id, message_id, model_id, payload):
+            captured.append(payload)
+            return {"payload": payload, "item_type": payload.get("type")}
+
+        async def fake_persist(rows):
+            return [f"u{i}" for i in range(len(rows))]
+
+        monkeypatch.setattr(Pipe, "send_openrouter_streaming_request", streaming)
+        monkeypatch.setattr(pipe._ensure_tool_executor(), "_execute_function_calls", mock_execute)
+        monkeypatch.setattr(pipe._artifact_store, "_make_db_row", fake_row)
+        monkeypatch.setattr(pipe._artifact_store, "_db_persist", fake_persist)
+
+        await pipe._streaming_handler._run_streaming_loop(
+            body, valves, None,
+            metadata={"model": {"id": "test"}, "chat_id": "c", "message_id": "m"},
+            tools={"f": {"callable": lambda **_k: "ok"}},
+            session=cast(Any, object()), user_id="u",
+        )
+        by_text = {(p.get("content") or [{}])[0].get("text", ""): p
+                   for p in captured if p.get("type") == "reasoning"}
+        assert by_text["pre"].get("_anchor_following_call_ordinal") == 0, by_text
+        assert by_text["post"].get("_anchor_preceding_call_ordinal") == 0, by_text
+
+    @pytest.mark.asyncio
+    async def test_reasoning_unechoed_in_output_sided_by_stream_order(self, monkeypatch, pipe_instance_async):
+        """A post-call reasoning streamed via output_item.done but OMITTED from
+        response.completed.output is still sided 'preceding' (not collapsed onto the
+        pre-call reasoning) using the generation-order call count. This count is
+        taken when the call is emitted, so it is robust to the tool later failing."""
+        pipe = pipe_instance_async
+        body = ResponsesBody(model="test/model", input=[], stream=True)
+        valves = pipe.valves.model_copy(update={
+            "TOOL_EXECUTION_MODE": "Pipeline", "MAX_FUNCTION_CALL_LOOPS": 2,
+            "PERSIST_REASONING_TOKENS": "conversation",
+        })
+        call_count = [0]
+
+        async def streaming(self, session, request_body, **_k):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                yield {"type": "response.output_item.done", "item": {
+                    "id": "rs-pre", "type": "reasoning", "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": "apre"}], "summary": [], "signature": "S1"}}
+                yield {"type": "response.output_item.done", "item": {
+                    "type": "function_call", "call_id": "callA", "name": "f",
+                    "arguments": "{}", "status": "completed"}}
+                yield {"type": "response.output_item.done", "item": {
+                    "id": "rs-post", "type": "reasoning", "status": "completed",
+                    "content": [{"type": "reasoning_text", "text": "bpost"}], "summary": [], "signature": "S2"}}
+                # response.completed OMITS rs-post (partial echo): only pre + call.
+                yield {"type": "response.completed", "response": {"output": [
+                    {"type": "reasoning", "id": "rs-pre",
+                     "content": [{"type": "reasoning_text", "text": "apre"}], "signature": "S1"},
+                    {"type": "function_call", "call_id": "callA", "name": "f", "arguments": "{}"},
+                ], "usage": {}}}
+            else:
+                yield {"type": "response.output_text.delta", "delta": "done"}
+                yield {"type": "response.completed", "response": {"output": [], "usage": {}}}
+
+        async def mock_execute(calls, registry):
+            return [{"type": "function_call_output", "call_id": "callA", "output": "out"}]
+
+        captured: list[dict] = []
+
+        def fake_row(c, m, md, payload):
+            captured.append(payload)
+            return {"payload": payload, "item_type": payload.get("type")}
+
+        async def fake_persist(rows):
+            return [f"u{i}" for i in range(len(rows))]
+
+        monkeypatch.setattr(Pipe, "send_openrouter_streaming_request", streaming)
+        monkeypatch.setattr(pipe._ensure_tool_executor(), "_execute_function_calls", mock_execute)
+        monkeypatch.setattr(pipe._artifact_store, "_make_db_row", fake_row)
+        monkeypatch.setattr(pipe._artifact_store, "_db_persist", fake_persist)
+
+        await pipe._streaming_handler._run_streaming_loop(
+            body, valves, None,
+            metadata={"model": {"id": "test"}, "chat_id": "c", "message_id": "m"},
+            tools={"f": {"callable": lambda **_k: "ok"}},
+            session=cast(Any, object()), user_id="u",
+        )
+        by_text = {(p.get("content") or [{}])[0].get("text", ""): p
+                   for p in captured if p.get("type") == "reasoning"}
+        # rs-pre echoed -> following 0; rs-post un-echoed -> preceding 0 (by stream order),
+        # NOT following 0 (which would collapse the two onto the same side).
+        assert by_text["apre"].get("_anchor_following_call_ordinal") == 0, by_text
+        assert by_text["bpost"].get("_anchor_preceding_call_ordinal") == 0, by_text
+        assert by_text["bpost"].get("_anchor_following_call_ordinal") is None, by_text
+        # The stream position is kept off the payload (side-channel), so no scratch
+        # key persists.
+        assert all("_tmp_stream_pos" not in p for p in by_text.values()), by_text
+
+    @pytest.mark.asyncio
+    async def test_reasoning_persist_no_scratch_keys_on_truncated_stream(self, monkeypatch, pipe_instance_async):
+        """A stream that persists a reasoning then ends WITHOUT response.completed
+        (truncation/abort) skips the derivation. Scratch stream-position state must
+        therefore never live ON the payload, or it would ride a persisted reasoning
+        to the DB and back onto the wire. Pin that nothing scratch persists."""
+        pipe = pipe_instance_async
+        body = ResponsesBody(model="test/model", input=[], stream=True)
+        valves = pipe.valves.model_copy(update={"PERSIST_REASONING_TOKENS": "conversation"})
+
+        async def streaming(self, session, request_body, **_k):
+            yield {"type": "response.output_item.done", "item": {
+                "id": "rs-x", "type": "reasoning", "status": "completed",
+                "content": [{"type": "reasoning_text", "text": "partial"}], "summary": [], "signature": "S"}}
+            # Stream ends here -- NO response.completed (truncated).
+
+        captured: list[dict] = []
+
+        def fake_row(c, m, md, payload):
+            captured.append(payload)
+            return {"payload": payload, "item_type": payload.get("type")}
+
+        async def fake_persist(rows):
+            return [f"u{i}" for i in range(len(rows))]
+
+        monkeypatch.setattr(Pipe, "send_openrouter_streaming_request", streaming)
+        monkeypatch.setattr(pipe._artifact_store, "_make_db_row", fake_row)
+        monkeypatch.setattr(pipe._artifact_store, "_db_persist", fake_persist)
+
+        await pipe._streaming_handler._run_streaming_loop(
+            body, valves, None,
+            metadata={"model": {"id": "test"}, "chat_id": "c", "message_id": "m"},
+            tools=None, session=cast(Any, object()), user_id="u",
+        )
+        reasoning = [p for p in captured if p.get("type") == "reasoning"]
+        assert reasoning, "reasoning should have been persisted on the truncated stream"
+        for p in reasoning:
+            assert not any(str(k).startswith("_tmp") for k in p), f"scratch key persisted: {list(p)}"
+
 
 # =============================================================================
 # Adaptive Tool Budgeting Tests
