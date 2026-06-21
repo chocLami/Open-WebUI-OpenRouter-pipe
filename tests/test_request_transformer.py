@@ -24,7 +24,8 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 
 from open_webui_openrouter_pipe import Pipe
-from open_webui_openrouter_pipe.storage.multimodal import InlinedFile
+from open_webui_openrouter_pipe.core.errors import RequiredInternalFileError
+from open_webui_openrouter_pipe.storage.owui_files import InlinedFile
 from open_webui_openrouter_pipe.requests.transformer import (
     transform_messages_to_input,
     _TOOL_OUTPUT_PRUNE_MIN_LENGTH,
@@ -895,7 +896,7 @@ class TestImageHandling:
             async def mock_inline(*args, **kwargs):
                 return InlinedFile(data_url="data:image/png;base64,test", filename="test.png")
 
-            pipe_instance._multimodal_handler._inline_owui_file_id = mock_inline
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline
 
             messages = [
                 {"role": "user", "content": [
@@ -921,7 +922,7 @@ class TestImageHandling:
             async def mock_inline(*args, **kwargs):
                 return InlinedFile(data_url="data:image/png;base64,test", filename="test.png")
 
-            pipe_instance._multimodal_handler._inline_owui_file_id = mock_inline
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline
 
             messages = [
                 {"role": "user", "content": [
@@ -1301,7 +1302,7 @@ class TestImageSelection:
             async def mock_download(*args, **kwargs):
                 return None
 
-            pipe_instance._multimodal_handler._inline_owui_file_id = mock_inline
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline
             pipe_instance._multimodal_handler._download_remote_url = mock_download
 
             messages = [
@@ -2576,7 +2577,7 @@ class TestImageProcessing:
             async def mock_inline(*args, **kwargs):
                 return InlinedFile(data_url="data:image/png;base64,test", filename="test.png")
 
-            pipe_instance._multimodal_handler._inline_owui_file_id = mock_inline
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline
 
             messages = [
                 {"role": "user", "content": [
@@ -2599,7 +2600,7 @@ class TestImageProcessing:
             async def mock_inline(*args, **kwargs):
                 return InlinedFile(data_url="data:image/png;base64,test", filename="test.png")
 
-            pipe_instance._multimodal_handler._inline_owui_file_id = mock_inline
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline
 
             messages = [
                 {"role": "user", "content": [
@@ -2622,7 +2623,7 @@ class TestImageProcessing:
             async def mock_inline(*args, **kwargs):
                 return InlinedFile(data_url="data:image/png;base64,test", filename="test.png")
 
-            pipe_instance._multimodal_handler._inline_owui_file_id = mock_inline
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline
 
             messages = [
                 {"role": "user", "content": [
@@ -2766,18 +2767,54 @@ class TestVideoProcessingEdgeCases:
         assert "youtube" in video_block["video_url"]["url"]
 
     @pytest.mark.asyncio
-    async def test_video_owui_file_url_passthrough(self, pipe_instance):
-        """OWUI file URLs pass through without SSRF checks."""
+    async def test_video_internal_owui_url_hard_fails(self, pipe_instance):
+        """Internal OWUI video URLs hard-fail instead of being forwarded.
+
+        Replaces the obsolete pass-through test: internal ``/api/v1/files/...``
+        video URLs now raise ``RequiredInternalFileError`` (strip/hard-fail) so
+        the internal URL never reaches the provider.
+        """
         messages = [
             {"role": "user", "content": [
                 {"type": "video_url", "video_url": {"url": "/api/v1/files/video123/content"}}
             ]}
         ]
 
+        with pytest.raises(RequiredInternalFileError) as excinfo:
+            await transform_messages_to_input(pipe_instance, messages)
+
+        assert excinfo.value.kind == "video"
+
+    @pytest.mark.asyncio
+    async def test_video_internal_owui_url_never_leaks_in_output(self, pipe_instance):
+        """No internal ``/api/v1/files/`` URL survives into any produced block."""
+        messages = [
+            {"role": "user", "content": [
+                {"type": "video", "url": "/api/v1/files/video456/content"}
+            ]}
+        ]
+
+        produced: list = []
+        try:
+            produced = await transform_messages_to_input(pipe_instance, messages)
+        except RequiredInternalFileError:
+            produced = []
+
+        assert "/api/v1/files/" not in json.dumps(produced)
+
+    @pytest.mark.asyncio
+    async def test_video_external_url_still_passes_through(self, pipe_instance):
+        """External video URLs are unaffected by the internal hard-fail path."""
+        messages = [
+            {"role": "user", "content": [
+                {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}}
+            ]}
+        ]
+
         result = await transform_messages_to_input(pipe_instance, messages)
 
         video_block = result[0]["content"][0]
-        assert "/api/v1/files/video123/content" in video_block["video_url"]["url"]
+        assert video_block["video_url"]["url"] == "https://example.com/clip.mp4"
 
 
 # =============================================================================
@@ -2824,12 +2861,12 @@ class TestExceptionHandling:
     async def test_block_transformation_exception_caught(self, pipe_instance):
         """Exceptions during block transformation are caught and logged."""
         # Patch _to_input_image to raise an exception
-        original_inline = pipe_instance._multimodal_handler._inline_owui_file_id
+        original_inline = pipe_instance._file_gateway.inline_owui_file_id
 
         async def failing_inline(*args, **kwargs):
             raise Exception("Simulated inline failure")
 
-        pipe_instance._multimodal_handler._inline_owui_file_id = failing_inline
+        pipe_instance._file_gateway.inline_owui_file_id = failing_inline
 
         with patch("open_webui_openrouter_pipe.requests.transformer.ModelFamily") as mock_family:
             mock_family.supports.return_value = True
@@ -2851,7 +2888,7 @@ class TestExceptionHandling:
             assert len(text_blocks) >= 1
 
         # Restore original
-        pipe_instance._multimodal_handler._inline_owui_file_id = original_inline
+        pipe_instance._file_gateway.inline_owui_file_id = original_inline
 
 
 # =============================================================================
@@ -2871,7 +2908,7 @@ class TestBlockTypeVariations:
             async def mock_inline(*args, **kwargs):
                 return InlinedFile(data_url=f"data:image/png;base64,{sample_image_base64}", filename="test.png")
 
-            pipe_instance._multimodal_handler._inline_owui_file_id = mock_inline
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline
 
             messages = [
                 {"role": "user", "content": [
@@ -3410,7 +3447,7 @@ class TestRemoteImageFilenameExtension:
                 return (None, None)
 
             pipe_instance._multimodal_handler._download_remote_url = mock_download
-            pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
+            pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
 
             messages = [
                 {"role": "user", "content": [
@@ -3476,8 +3513,8 @@ class TestFileDataUrlProcessing:
         async def mock_emit_status(*args, **kwargs):
             pass
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
-        pipe_instance._multimodal_handler._upload_to_owui_storage = mock_upload
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.upload_to_owui_storage = mock_upload
         pipe_instance._event_emitter_handler._emit_status = mock_emit_status
 
         messages = [
@@ -3553,9 +3590,9 @@ class TestFileRemoteUrlDownload:
         async def mock_emit_status(*args, **kwargs):
             pass
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
         pipe_instance._multimodal_handler._download_remote_url = mock_download
-        pipe_instance._multimodal_handler._upload_to_owui_storage = mock_upload
+        pipe_instance._file_gateway.upload_to_owui_storage = mock_upload
         pipe_instance._event_emitter_handler._emit_status = mock_emit_status
 
         messages = [
@@ -3574,6 +3611,52 @@ class TestFileRemoteUrlDownload:
         assert file_block.get("file_id") == "stored-remote-file-123"
 
     @pytest.mark.asyncio
+    async def test_external_url_with_files_path_is_downloaded_not_internal(self, pipe_instance, sample_image_base64):
+        """An external URL containing '/files/' is remote (downloaded/re-hosted), not OWUI-internal."""
+        pipe_instance.valves.SAVE_FILE_DATA_CONTENT = True
+        file_bytes = base64.b64decode(sample_image_base64)
+
+        mock_request = MagicMock()
+        mock_user = MagicMock()
+        mock_user.id = "test-user"
+
+        async def mock_resolve_storage(*args, **kwargs):
+            return (mock_request, mock_user)
+
+        downloaded = []
+
+        async def mock_download(url):
+            downloaded.append(url)
+            return {"data": file_bytes, "mime_type": "application/pdf"}
+
+        async def mock_upload(*args, **kwargs):
+            return "stored-remote-file-456"
+
+        async def mock_emit_status(*args, **kwargs):
+            pass
+
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
+        pipe_instance._multimodal_handler._download_remote_url = mock_download
+        pipe_instance._file_gateway.upload_to_owui_storage = mock_upload
+        pipe_instance._event_emitter_handler._emit_status = mock_emit_status
+
+        messages = [
+            {"role": "user", "content": [
+                {"type": "input_file", "file_data": "https://cdn.example.com/files/report.pdf"}
+            ]}
+        ]
+
+        result = await transform_messages_to_input(
+            pipe_instance,
+            messages,
+            chat_id="test_chat",
+        )
+
+        file_block = result[0]["content"][0]
+        assert downloaded == ["https://cdn.example.com/files/report.pdf"]
+        assert file_block.get("file_id") == "stored-remote-file-456"
+
+    @pytest.mark.asyncio
     async def test_file_data_remote_url_download_fails_uses_url(self, pipe_instance):
         """Failed download falls back to using URL as-is (lines 662-678)."""
         pipe_instance.valves.SAVE_FILE_DATA_CONTENT = True
@@ -3588,7 +3671,7 @@ class TestFileRemoteUrlDownload:
         async def mock_emit_notification(emitter, msg, level="info"):
             notification_called.append(msg)
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
         pipe_instance._multimodal_handler._download_remote_url = mock_download_fail
         pipe_instance._event_emitter_handler._emit_notification = mock_emit_notification
 
@@ -3624,7 +3707,7 @@ class TestFileRemoteUrlDownload:
         async def mock_emit_error(*args, **kwargs):
             pass
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
         pipe_instance._multimodal_handler._download_remote_url = mock_download_raise
         pipe_instance._ensure_error_formatter()._emit_error = mock_emit_error
 
@@ -3662,8 +3745,8 @@ class TestFileUrlProcessing:
         async def mock_emit_status(*args, **kwargs):
             pass
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
-        pipe_instance._multimodal_handler._upload_to_owui_storage = mock_upload
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.upload_to_owui_storage = mock_upload
         pipe_instance._event_emitter_handler._emit_status = mock_emit_status
 
         messages = [
@@ -3732,9 +3815,9 @@ class TestFileUrlProcessing:
         async def mock_emit_status(*args, **kwargs):
             pass
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
         pipe_instance._multimodal_handler._download_remote_url = mock_download
-        pipe_instance._multimodal_handler._upload_to_owui_storage = mock_upload
+        pipe_instance._file_gateway.upload_to_owui_storage = mock_upload
         pipe_instance._event_emitter_handler._emit_status = mock_emit_status
 
         messages = [
@@ -3767,7 +3850,7 @@ class TestFileUrlProcessing:
         async def mock_emit_notification(emitter, msg, level="info"):
             notifications.append(msg)
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
         pipe_instance._multimodal_handler._download_remote_url = mock_download_fail
         pipe_instance._event_emitter_handler._emit_notification = mock_emit_notification
 
@@ -3804,7 +3887,7 @@ class TestFileUrlProcessing:
         async def mock_emit_error(*args, **kwargs):
             pass
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
         pipe_instance._multimodal_handler._download_remote_url = mock_download_raise
         pipe_instance._ensure_error_formatter()._emit_error = mock_emit_error
 
@@ -3868,8 +3951,8 @@ class TestFileProcessingException:
         async def raise_on_storage(*args, **kwargs):
             raise RuntimeError("Storage context error")
 
-        original_resolve = pipe_instance._multimodal_handler._resolve_storage_context
-        pipe_instance._multimodal_handler._resolve_storage_context = raise_on_storage
+        original_resolve = pipe_instance._file_gateway.resolve_storage_context
+        pipe_instance._file_gateway.resolve_storage_context = raise_on_storage
 
         # Enable the path that would call storage context
         pipe_instance.valves.SAVE_FILE_DATA_CONTENT = True
@@ -3887,7 +3970,7 @@ class TestFileProcessingException:
         # Should still return a result
         assert len(result) == 1
 
-        pipe_instance._multimodal_handler._resolve_storage_context = original_resolve
+        pipe_instance._file_gateway.resolve_storage_context = original_resolve
 
 
 class TestAudioProcessingEdgeCasesExtended:
@@ -3934,8 +4017,8 @@ class TestAudioProcessingEdgeCasesExtended:
         data_url = f"data:audio/mp3;base64,{large_b64}"
 
         # Mock _validate_base64_size to return False
-        original_validate = pipe_instance._multimodal_handler._validate_base64_size
-        pipe_instance._multimodal_handler._validate_base64_size = lambda x: False
+        original_validate = pipe_instance._file_gateway.validate_base64_size
+        pipe_instance._file_gateway.validate_base64_size = lambda x: False
 
         messages = [
             {"role": "user", "content": [
@@ -3949,7 +4032,7 @@ class TestAudioProcessingEdgeCasesExtended:
         # Size validation failure should return empty block
         assert audio_block["input_audio"]["data"] == ""
 
-        pipe_instance._multimodal_handler._validate_base64_size = original_validate
+        pipe_instance._file_gateway.validate_base64_size = original_validate
 
 
 class TestVideoSSRFProtection:
@@ -4043,10 +4126,10 @@ class TestBlockTransformationException:
             pipe_instance._ensure_error_formatter()._emit_error = failing_emit
 
             # Mock _validate_base64_size to raise
-            original_validate = pipe_instance._multimodal_handler._validate_base64_size
+            original_validate = pipe_instance._file_gateway.validate_base64_size
             def raise_on_validate(data):
                 raise RuntimeError("Validation error")
-            pipe_instance._multimodal_handler._validate_base64_size = raise_on_validate
+            pipe_instance._file_gateway.validate_base64_size = raise_on_validate
 
             messages = [
                 {"role": "user", "content": [
@@ -4060,7 +4143,7 @@ class TestBlockTransformationException:
             # Should have both blocks - text converted, audio preserved on error
             assert len(result[0]["content"]) >= 1
 
-            pipe_instance._multimodal_handler._validate_base64_size = original_validate
+            pipe_instance._file_gateway.validate_base64_size = original_validate
 
 
 class TestAssistantImageFallbackException:
@@ -4082,7 +4165,7 @@ class TestAssistantImageFallbackException:
             async def mock_download(*args, **kwargs):
                 return None
 
-            pipe_instance._multimodal_handler._inline_owui_file_id = raise_on_inline
+            pipe_instance._file_gateway.inline_owui_file_id = raise_on_inline
             pipe_instance._multimodal_handler._download_remote_url = mock_download
 
             messages = [
@@ -4147,7 +4230,7 @@ class TestStorageContextNoUpload:
         async def mock_no_storage(*args, **kwargs):
             return (None, None)
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_no_storage
+        pipe_instance._file_gateway.resolve_storage_context = mock_no_storage
 
         messages = [
             {"role": "user", "content": [
@@ -4190,8 +4273,8 @@ class TestFilenameExtensionFromMime:
         async def mock_emit_status(*args, **kwargs):
             pass
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
-        pipe_instance._multimodal_handler._upload_to_owui_storage = mock_upload
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.upload_to_owui_storage = mock_upload
         pipe_instance._event_emitter_handler._emit_status = mock_emit_status
 
         messages = [
@@ -4247,9 +4330,9 @@ class TestImageStorageUpload:
             async def mock_emit_status(*args, **kwargs):
                 pass
 
-            pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
-            pipe_instance._multimodal_handler._upload_to_owui_storage = mock_upload
-            pipe_instance._multimodal_handler._inline_owui_file_id = mock_inline
+            pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
+            pipe_instance._file_gateway.upload_to_owui_storage = mock_upload
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline
             pipe_instance._event_emitter_handler._emit_status = mock_emit_status
 
             messages = [
@@ -4290,8 +4373,8 @@ class TestImageStorageUpload:
             async def mock_emit_error(*args, **kwargs):
                 pass
 
-            pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
-            pipe_instance._multimodal_handler._upload_to_owui_storage = mock_upload_fail
+            pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
+            pipe_instance._file_gateway.upload_to_owui_storage = mock_upload_fail
             pipe_instance._ensure_error_formatter()._emit_error = mock_emit_error
 
             messages = [
@@ -4333,10 +4416,10 @@ class TestImageStorageUpload:
             async def mock_emit_status(*args, **kwargs):
                 pass
 
-            pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
+            pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
             pipe_instance._multimodal_handler._download_remote_url = mock_download
-            pipe_instance._multimodal_handler._upload_to_owui_storage = mock_upload
-            pipe_instance._multimodal_handler._inline_owui_file_id = mock_inline
+            pipe_instance._file_gateway.upload_to_owui_storage = mock_upload
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline
             pipe_instance._event_emitter_handler._emit_status = mock_emit_status
 
             messages = [
@@ -4356,26 +4439,23 @@ class TestImageStorageUpload:
 
 
 class TestImageInliningFailure:
-    """Tests for image inlining failure path (lines 471-477)."""
+    """Tests for the required-internal-image hard-fail path."""
 
     @pytest.mark.asyncio
-    async def test_image_inline_returns_none_skips_image(self, pipe_instance):
-        """Image block is skipped when inline returns None (lines 471-477)."""
+    async def test_required_image_inline_returns_none_raises(self, pipe_instance):
+        """A required current-user image that cannot be inlined hard-fails.
+
+        When the gateway inline returns None for a current-user internal image,
+        ``transform_messages_to_input`` raises ``RequiredInternalFileError``; the
+        error is NOT swallowed by the block-transform outer loop.
+        """
         with patch("open_webui_openrouter_pipe.requests.transformer.ModelFamily") as mock_family:
             mock_family.supports.return_value = True
 
-            # Mock inline to return None (file not available)
             async def mock_inline_none(file_id, **kwargs):
                 return None
 
-            status_messages = []
-            async def mock_emit_status(emitter, msg, done=False):
-                status_messages.append(msg)
-
-            pipe_instance._multimodal_handler._inline_owui_file_id = mock_inline_none
-            pipe_instance._event_emitter_handler._emit_status = mock_emit_status
-
-            event_emitter = MagicMock()
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline_none
 
             messages = [
                 {"role": "user", "content": [
@@ -4384,17 +4464,98 @@ class TestImageInliningFailure:
                 ]}
             ]
 
-            result = await transform_messages_to_input(
-                pipe_instance,
-                messages,
-                event_emitter=event_emitter
-            )
+            with pytest.raises(RequiredInternalFileError) as excinfo:
+                await transform_messages_to_input(pipe_instance, messages)
 
-            # Image should be skipped (None returned)
-            image_blocks = [b for b in result[0]["content"] if b.get("type") == "input_image"]
+            assert excinfo.value.kind == "image"
+
+    @pytest.mark.asyncio
+    async def test_required_image_inline_raising_not_swallowed(self, pipe_instance):
+        """A RequiredInternalFileError raised by the gateway inline escapes the loop."""
+        with patch("open_webui_openrouter_pipe.requests.transformer.ModelFamily") as mock_family:
+            mock_family.supports.return_value = True
+
+            async def mock_inline_raise(file_id, **kwargs):
+                raise RequiredInternalFileError("denied", kind="image", denied=True)
+
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline_raise
+
+            messages = [
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "/api/v1/files/denied-file/content"}}
+                ]}
+            ]
+
+            with pytest.raises(RequiredInternalFileError) as excinfo:
+                await transform_messages_to_input(pipe_instance, messages)
+
+            assert excinfo.value.denied is True
+
+    @pytest.mark.asyncio
+    async def test_required_image_failure_aborts_before_any_output(self, pipe_instance):
+        """The required-image failure aborts before producing any input blocks.
+
+        The raise propagates out of ``transform_messages_to_input`` so no result
+        is returned; the failing block is never re-appended and its internal URL
+        cannot leak because no output exists.
+        """
+        with patch("open_webui_openrouter_pipe.requests.transformer.ModelFamily") as mock_family:
+            mock_family.supports.return_value = True
+
+            async def mock_inline_none(file_id, **kwargs):
+                return None
+
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline_none
+
+            messages = [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "leading text"},
+                    {"type": "image_url", "image_url": {"url": "/api/v1/files/leak-file/content"}}
+                ]}
+            ]
+
+            produced = None
+            with pytest.raises(RequiredInternalFileError):
+                produced = await transform_messages_to_input(pipe_instance, messages)
+
+            assert produced is None
+
+    @pytest.mark.asyncio
+    async def test_assistant_reuse_uninlineable_image_does_not_raise(self, pipe_instance):
+        """Best-effort assistant-image reuse warns/skips instead of hard-failing.
+
+        The fallback rehydration path calls the image transform with
+        ``required=False``; an uninlineable assistant image is dropped silently
+        rather than raising, and no internal URL leaks into the output.
+        """
+        pipe_instance.valves.IMAGE_INPUT_SELECTION = "user_then_assistant"
+        pipe_instance.valves.MAX_INPUT_IMAGES_PER_REQUEST = 5
+
+        with patch("open_webui_openrouter_pipe.requests.transformer.ModelFamily") as mock_family:
+            mock_family.supports.return_value = True
+
+            async def mock_inline_none(file_id, **kwargs):
+                return None
+
+            pipe_instance._file_gateway.inline_owui_file_id = mock_inline_none
+
+            messages = [
+                {"role": "assistant", "content": "![img](/api/v1/files/historic-img/content)"},
+                {"role": "user", "content": [{"type": "text", "text": "please edit"}]},
+            ]
+
+            result = await transform_messages_to_input(pipe_instance, messages)
+
+            user_msg = result[-1]
+            image_blocks = [b for b in user_msg["content"] if b.get("type") == "input_image"]
             assert len(image_blocks) == 0
-            # Status message about unavailable file should be emitted
-            assert any("unavailable" in msg.lower() for msg in status_messages)
+            all_image_blocks = [
+                b
+                for item in result
+                for b in (item.get("content") or [])
+                if isinstance(b, dict) and b.get("type") == "input_image"
+            ]
+            assert all("/api/v1/files/" not in b.get("image_url", "") for b in all_image_blocks)
 
 
 class TestVideoBase64StatusEmission:
@@ -4451,7 +4612,7 @@ class TestFileLabelFallbackHost:
         async def mock_emit_notification(emitter, msg, level="info"):
             notifications.append(msg)
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
         pipe_instance._multimodal_handler._download_remote_url = mock_download_fail
         pipe_instance._event_emitter_handler._emit_notification = mock_emit_notification
 
@@ -4489,7 +4650,7 @@ class TestFileLabelFallbackHost:
         async def mock_emit_notification(emitter, msg, level="info"):
             notifications.append(msg)
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_storage
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_storage
         pipe_instance._multimodal_handler._download_remote_url = mock_download_fail
         pipe_instance._event_emitter_handler._emit_notification = mock_emit_notification
 
@@ -4560,8 +4721,8 @@ class TestAudioBase64SizeValidation:
     async def test_audio_base64_size_validation_in_normalize(self, pipe_instance, sample_audio_base64):
         """Audio base64 that fails size validation in _normalize_base64 (lines 831-832)."""
         # Mock _validate_base64_size to return False inside _normalize_base64 path
-        original_validate = pipe_instance._multimodal_handler._validate_base64_size
-        pipe_instance._multimodal_handler._validate_base64_size = lambda x: False
+        original_validate = pipe_instance._file_gateway.validate_base64_size
+        pipe_instance._file_gateway.validate_base64_size = lambda x: False
 
         messages = [
             {"role": "user", "content": [
@@ -4575,7 +4736,7 @@ class TestAudioBase64SizeValidation:
         # Size validation should fail, resulting in empty data
         assert audio_block["input_audio"]["data"] == ""
 
-        pipe_instance._multimodal_handler._validate_base64_size = original_validate
+        pipe_instance._file_gateway.validate_base64_size = original_validate
 
 
 class TestBlockTransformExceptionNonImage:
@@ -4594,7 +4755,7 @@ class TestBlockTransformExceptionNonImage:
         # The inner handlers catch most exceptions, so we need to be creative
 
         # Let's directly test by patching the file block processing
-        original_resolve = pipe_instance._multimodal_handler._resolve_storage_context
+        original_resolve = pipe_instance._file_gateway.resolve_storage_context
 
         call_count = [0]
         async def mock_resolve_raises(*args, **kwargs):
@@ -4603,7 +4764,7 @@ class TestBlockTransformExceptionNonImage:
                 raise RuntimeError("Simulated failure")
             return (None, None)
 
-        pipe_instance._multimodal_handler._resolve_storage_context = mock_resolve_raises
+        pipe_instance._file_gateway.resolve_storage_context = mock_resolve_raises
         pipe_instance.valves.SAVE_FILE_DATA_CONTENT = True
 
         messages = [
@@ -4618,7 +4779,7 @@ class TestBlockTransformExceptionNonImage:
         # Text block should still be present
         assert len(result[0]["content"]) >= 1
 
-        pipe_instance._multimodal_handler._resolve_storage_context = original_resolve
+        pipe_instance._file_gateway.resolve_storage_context = original_resolve
 
 
 class TestVisionWarningLatestUserMessage:

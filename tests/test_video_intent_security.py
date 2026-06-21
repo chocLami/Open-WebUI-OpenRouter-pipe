@@ -5,10 +5,11 @@ import io
 import logging
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from open_webui_openrouter_pipe.core.errors import RequiredInternalFileError
 from open_webui_openrouter_pipe.core.utils import (
     _safe_marker_body,
     _serialize_kind_marker,
@@ -143,62 +144,99 @@ class TestDowngradeUserFacingMessages:
 # -----------------------------------------------------------------------------
 
 class TestResolveOwuiFilePath:
-    @pytest.mark.asyncio
-    async def test_rejects_cross_user_file(self):
+    """Gateway-backed `_resolve_owui_file_path`.
+
+    The method now looks the record up via the module-level `get_file_by_id`,
+    routes the authorised read through `materialize_owui_file_to_temp` (any
+    Storage backend), and returns a PRIVATE TEMP Path the caller owns — never
+    the persistent UPLOAD_DIR path. Auth/size/containment failures surface as
+    `RequiredInternalFileError`, which the method swallows and degrades to None.
+    """
+
+    def _make_adapter(self):
         from open_webui_openrouter_pipe.integrations.video import VideoGenerationAdapter
-        # Build a minimal pipe stub
         pipe = MagicMock()
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=SimpleNamespace(
-            user_id="user_A",
-            path="/some/legit/path.mp4",
-        ))
-        adapter = VideoGenerationAdapter(pipe=pipe, logger=logging.getLogger("test"))
-        # Requester is user_B
-        result = await adapter._resolve_owui_file_path(
-            file_id="file_A", request=None,
-            user_obj=SimpleNamespace(id="user_B"),
-        )
-        assert result is None
+        pipe.valves.VIDEO_MAX_SIZE_MB = 500
+        pipe.valves.ALLOW_UNKNOWN_SIZE_CLOUD_READS = False
+        pipe.logger = logging.getLogger("test")
+        return VideoGenerationAdapter(pipe=pipe, logger=logging.getLogger("test"))
 
     @pytest.mark.asyncio
-    async def test_rejects_non_video_extension(self):
-        from open_webui_openrouter_pipe.integrations.video import VideoGenerationAdapter
-        pipe = MagicMock()
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=SimpleNamespace(
-            user_id="user_A",
-            path="/some/path/file.exe",
-        ))
-        adapter = VideoGenerationAdapter(pipe=pipe, logger=logging.getLogger("test"))
-        result = await adapter._resolve_owui_file_path(
-            file_id="x", request=None,
-            user_obj=SimpleNamespace(id="user_A"),
-        )
+    async def test_returns_temp_path_not_persistent_path_on_success(self):
+        """Success returns the materialised TEMP path, not the persistent
+        `file_obj.path` under UPLOAD_DIR."""
+        adapter = self._make_adapter()
+        persistent = "/srv/owui/uploads/user_A/legit.mp4"
+        temp_path = Path("/tmp/orpipe-read-deadbeef.mp4")
+        file_obj = SimpleNamespace(id="file_A", user_id="user_A", path=persistent)
+        with patch(
+            "open_webui_openrouter_pipe.integrations.video.get_file_by_id",
+            AsyncMock(return_value=file_obj),
+        ), patch(
+            "open_webui_openrouter_pipe.integrations.video.materialize_owui_file_to_temp",
+            AsyncMock(return_value=temp_path),
+        ) as mat:
+            result = await adapter._resolve_owui_file_path(
+                file_id="file_A", request=None,
+                user_obj=SimpleNamespace(id="user_A"),
+            )
+        assert result == temp_path
+        assert str(result) != persistent
+        mat.assert_awaited_once()
+        assert mat.await_args is not None
+        kwargs = mat.await_args.kwargs
+        assert kwargs["user"] == SimpleNamespace(id="user_A")
+        assert kwargs["max_bytes"] == 500 * 1024 * 1024
+        assert {".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi"} == kwargs["allowed_suffixes"]
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_required_internal_file_error(self):
+        """An auth/size/containment denial from the gateway degrades to None
+        (best-effort frame extraction), not a crash."""
+        adapter = self._make_adapter()
+        file_obj = SimpleNamespace(id="file_A", user_id="user_A", path="/srv/up/x.mp4")
+        with patch(
+            "open_webui_openrouter_pipe.integrations.video.get_file_by_id",
+            AsyncMock(return_value=file_obj),
+        ), patch(
+            "open_webui_openrouter_pipe.integrations.video.materialize_owui_file_to_temp",
+            AsyncMock(side_effect=RequiredInternalFileError("denied", denied=True)),
+        ):
+            result = await adapter._resolve_owui_file_path(
+                file_id="file_A", request=None,
+                user_obj=SimpleNamespace(id="user_B"),
+            )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_returns_none_when_file_obj_none(self):
-        from open_webui_openrouter_pipe.integrations.video import VideoGenerationAdapter
-        pipe = MagicMock()
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=None)
-        adapter = VideoGenerationAdapter(pipe=pipe, logger=logging.getLogger("test"))
-        result = await adapter._resolve_owui_file_path(
-            file_id="x", request=None,
-            user_obj=SimpleNamespace(id="user_A"),
-        )
+        adapter = self._make_adapter()
+        with patch(
+            "open_webui_openrouter_pipe.integrations.video.get_file_by_id",
+            AsyncMock(return_value=None),
+        ), patch(
+            "open_webui_openrouter_pipe.integrations.video.materialize_owui_file_to_temp",
+            AsyncMock(),
+        ) as mat:
+            result = await adapter._resolve_owui_file_path(
+                file_id="x", request=None,
+                user_obj=SimpleNamespace(id="user_A"),
+            )
         assert result is None
+        mat.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_owner_id_missing(self):
-        from open_webui_openrouter_pipe.integrations.video import VideoGenerationAdapter
-        pipe = MagicMock()
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=SimpleNamespace(
-            path="/some/path/file.mp4",
-        ))
-        adapter = VideoGenerationAdapter(pipe=pipe, logger=logging.getLogger("test"))
-        result = await adapter._resolve_owui_file_path(
-            file_id="x", request=None,
-            user_obj=SimpleNamespace(id="user_A"),
-        )
+    async def test_returns_none_on_unexpected_error(self):
+        """Any non-cancellation error is swallowed and degrades to None."""
+        adapter = self._make_adapter()
+        with patch(
+            "open_webui_openrouter_pipe.integrations.video.get_file_by_id",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            result = await adapter._resolve_owui_file_path(
+                file_id="x", request=None,
+                user_obj=SimpleNamespace(id="user_A"),
+            )
         assert result is None
 
 

@@ -10,7 +10,7 @@ import pytest
 
 from open_webui_openrouter_pipe import Pipe
 from open_webui_openrouter_pipe.requests.transformer import transform_messages_to_input
-from open_webui_openrouter_pipe.storage.multimodal import InlinedFile
+from open_webui_openrouter_pipe.storage.owui_files import InlinedFile
 
 
 async def _transform_single_block(
@@ -50,18 +50,18 @@ async def test_supported_image_formats_are_inlined(
         ext = "jpg"
 
     monkeypatch.setattr(
-        pipe_instance._multimodal_handler,
-        "_resolve_storage_context",
+        pipe_instance._file_gateway,
+        "resolve_storage_context",
         AsyncMock(return_value=(mock_request, mock_user)),
     )
     monkeypatch.setattr(
-        pipe_instance._multimodal_handler,
-        "_upload_to_owui_storage",
+        pipe_instance._file_gateway,
+        "upload_to_owui_storage",
         AsyncMock(return_value="mock-image"),
     )
     monkeypatch.setattr(
-        pipe_instance._multimodal_handler,
-        "_inline_owui_file_id",
+        pipe_instance._file_gateway,
+        "inline_owui_file_id",
         AsyncMock(return_value=InlinedFile(data_url=inline_value, filename=f"test.{ext}")),
     )
 
@@ -71,7 +71,7 @@ async def test_supported_image_formats_are_inlined(
 
     assert result["type"] == "input_image"
     assert result["image_url"] == inline_value
-    pipe_instance._multimodal_handler._inline_owui_file_id.assert_awaited_once()
+    pipe_instance._file_gateway.inline_owui_file_id.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -146,5 +146,5 @@ def test_file_size_limit_enforced(pipe_instance):
     small_payload = base64.b64encode(b"0" * (256 * 1024)).decode("ascii")
     large_payload = base64.b64encode(b"0" * (2 * 1024 * 1024)).decode("ascii")
 
-    assert pipe_instance._multimodal_handler._validate_base64_size(small_payload) is True
-    assert pipe_instance._multimodal_handler._validate_base64_size(large_payload) is False
+    assert pipe_instance._file_gateway.validate_base64_size(small_payload) is True
+    assert pipe_instance._file_gateway.validate_base64_size(large_payload) is False

@@ -420,6 +420,25 @@ def _install_open_webui_stubs() -> None:
     middleware_mod.get_citation_source_from_tool_result = _get_citation_source_from_tool_result
     middleware_mod.process_tool_result = _process_tool_result
     utils_pkg.middleware = middleware_mod
+
+    # Stub for open_webui.utils.access_control.files.has_access_to_file
+    # (lazily imported by storage/owui_files.authorize_file_read). The default
+    # raises so tests must opt in explicitly via monkeypatch; this also exercises
+    # the gateway's fail-closed except path when left unpatched. Additive only.
+    access_control_pkg = cast(Any, _ensure_module("open_webui.utils.access_control"))
+    access_control_pkg.__path__ = []  # mark as package
+    access_control_files_mod = cast(Any, _ensure_module("open_webui.utils.access_control.files"))
+
+    async def _has_access_to_file(_file_id, _access_type, _user, db=None):
+        """Default stub: raise so callers must monkeypatch per-test."""
+        raise NotImplementedError(
+            "has_access_to_file is not stubbed; monkeypatch it in the test"
+        )
+
+    access_control_files_mod.has_access_to_file = _has_access_to_file
+    access_control_pkg.files = access_control_files_mod
+    utils_pkg.access_control = access_control_pkg
+
     open_webui.utils = utils_pkg
 
     config_mod = cast(Any, _ensure_module("open_webui.config"))

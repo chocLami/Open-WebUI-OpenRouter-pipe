@@ -30,6 +30,7 @@ from .task_model_adapter import TaskModelAdapter
 from .sanitizer import _sanitize_request_input
 from ..integrations.anthropic import _is_anthropic_model_id
 from ..storage.users import get_user_by_id
+from ..storage.owui_files import get_file_by_id, infer_file_mime_type
 
 if TYPE_CHECKING:
     from ..pipe import Pipe
@@ -263,10 +264,12 @@ class RequestOrchestrator:
                 file_id = item.get("id")
                 if not isinstance(file_id, str) or not file_id:
                     continue
-                file_obj = await self._pipe._multimodal_handler._get_file_by_id(file_id)
+                file_obj = await get_file_by_id(file_id, self._pipe.logger)
                 if not file_obj:
                     raise ValueError(f"Native audio attachment '{file_id}' could not be loaded.")
-                b64 = await self._pipe._multimodal_handler._read_file_record_base64(file_obj, chunk_size, max_bytes)
+                b64 = await self._pipe._file_gateway.read_file_record_base64(
+                    file_obj, chunk_size, max_bytes, user=user_model
+                )
                 if not b64:
                     raise ValueError(f"Native audio attachment '{file_id}' could not be encoded.")
                 declared = item.get("format")
@@ -289,15 +292,17 @@ class RequestOrchestrator:
                 file_id = item.get("id")
                 if not isinstance(file_id, str) or not file_id:
                     continue
-                file_obj = await self._pipe._multimodal_handler._get_file_by_id(file_id)
+                file_obj = await get_file_by_id(file_id, self._pipe.logger)
                 if not file_obj:
                     raise ValueError(f"Native video attachment '{file_id}' could not be loaded.")
-                b64 = await self._pipe._multimodal_handler._read_file_record_base64(file_obj, chunk_size, max_bytes)
+                b64 = await self._pipe._file_gateway.read_file_record_base64(
+                    file_obj, chunk_size, max_bytes, user=user_model
+                )
                 if not b64:
                     raise ValueError(f"Native video attachment '{file_id}' could not be encoded.")
                 mime = item.get("content_type")
                 if not isinstance(mime, str) or not mime.strip():
-                    mime = self._pipe._multimodal_handler._infer_file_mime_type(file_obj)
+                    mime = infer_file_mime_type(file_obj)
                 data_url = f"data:{mime.strip()};base64,{b64}"
                 content_blocks.append(
                     {
@@ -309,6 +314,12 @@ class RequestOrchestrator:
             last_user_msg["content"] = content_blocks
 
         user_id = user_id or str(__user__.get("id") or __metadata__.get("user_id") or "")
+        user_model = None
+        if user_id:
+            try:
+                user_model = await get_user_by_id(user_id, self.logger)
+            except Exception:  # pragma: no cover - defensive guard
+                user_model = None
         chat_id = (__metadata__ or {}).get("chat_id")
         chat_id = chat_id.strip() if isinstance(chat_id, str) else ""
         task_name = TaskModelAdapter._task_name(__task__) if __task__ else ""
@@ -456,14 +467,6 @@ class RequestOrchestrator:
         raw_model = completions_body.model if isinstance(completions_body.model, str) else ""
         raw_norm = ModelFamily.base_model(raw_model) if raw_model else ""
         pre_capability_model_id = vvb.get(raw_norm) if raw_norm and raw_norm in vvb else None
-
-        # Resolve full Open WebUI user model for uploads/status events.
-        user_model = None
-        if user_id:
-            try:
-                user_model = await get_user_by_id(user_id, self.logger)
-            except Exception:  # pragma: no cover - defensive guard
-                user_model = None
 
         responses_body = await ResponsesBody.from_completions(
             completions_body=completions_body,

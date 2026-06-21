@@ -152,6 +152,7 @@ class TaskModelAdapter:
                     api_key=EncryptedStr.decrypt(valves.API_KEY),
                     base_url=valves.BASE_URL,
                     valves=valves,
+                    user=user_obj,
                 )
 
                 usage = response.get("usage") if isinstance(response, dict) else None

@@ -104,11 +104,13 @@ if TYPE_CHECKING:
         _ENCRYPTED_PAYLOAD_VERSION,
     )
     from .storage.multimodal import (
-        _extract_internal_file_id,
         MultimodalHandler,
         _guess_image_mime_type,
         _extract_openrouter_og_image,
-        _is_internal_file_url,
+    )
+    from .storage.owui_files import (
+        extract_internal_file_id,
+        is_internal_file_url,
     )
     from .tools.tool_schema import _classify_function_call_artifacts, _strictify_schema
     from .tools.tool_registry import (
@@ -198,7 +200,7 @@ __all__ = [
     "_template_value_present",
     "_debug_print_request",
     "_normalize_optional_str",
-    "_extract_internal_file_id",
+    "extract_internal_file_id",
     "_wrap_event_emitter",
     "merge_usage_stats",
     "wrap_code_block",
@@ -220,7 +222,7 @@ __all__ = [
     "MultimodalHandler",
     "_guess_image_mime_type",
     "_extract_openrouter_og_image",
-    "_is_internal_file_url",
+    "is_internal_file_url",
     "StreamingHandler",
     "EventEmitterHandler",
     "NonStreamingAdapter",
@@ -341,11 +343,11 @@ _LAZY_IMPORTS = {
     "_ENCRYPTED_PAYLOAD_VERSION": (".storage.persistence", "_ENCRYPTED_PAYLOAD_VERSION"),
 
     # Storage multimodal
-    "_extract_internal_file_id": (".storage.multimodal", "_extract_internal_file_id"),
+    "extract_internal_file_id": (".storage.owui_files", "extract_internal_file_id"),
     "MultimodalHandler": (".storage.multimodal", "MultimodalHandler"),
     "_guess_image_mime_type": (".storage.multimodal", "_guess_image_mime_type"),
     "_extract_openrouter_og_image": (".storage.multimodal", "_extract_openrouter_og_image"),
-    "_is_internal_file_url": (".storage.multimodal", "_is_internal_file_url"),
+    "is_internal_file_url": (".storage.owui_files", "is_internal_file_url"),
 
     # Tools
     "_classify_function_call_artifacts": (".tools.tool_schema", "_classify_function_call_artifacts"),

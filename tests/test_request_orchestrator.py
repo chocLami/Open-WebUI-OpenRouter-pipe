@@ -37,7 +37,7 @@ import pytest
 from aioresponses import aioresponses, CallbackResult
 
 from open_webui_openrouter_pipe import Pipe, EncryptedStr
-from open_webui_openrouter_pipe.storage.multimodal import InlinedFile
+from open_webui_openrouter_pipe.storage.owui_files import InlinedFile
 
 
 # -----------------------------------------------------------------------------
@@ -322,7 +322,7 @@ async def test_extract_direct_uploads_skips_invalid_items():
         async def mock_inline_owui_file_id(file_id, *args, **kwargs):
             return InlinedFile(data_url=f"data:application/pdf;base64,{_pdf_like_base64()}", filename="doc.pdf")
 
-        pipe._multimodal_handler._inline_owui_file_id = mock_inline_owui_file_id
+        pipe._file_gateway.inline_owui_file_id = mock_inline_owui_file_id
 
         with aioresponses() as mock_http:
             mock_http.post(
@@ -523,7 +523,7 @@ async def test_inject_direct_uploads_handles_list_content():
         async def mock_inline_owui_file_id(file_id, *args, **kwargs):
             return InlinedFile(data_url=f"data:application/pdf;base64,{_pdf_like_base64()}", filename="doc.pdf")
 
-        pipe._multimodal_handler._inline_owui_file_id = mock_inline_owui_file_id
+        pipe._file_gateway.inline_owui_file_id = mock_inline_owui_file_id
 
         with aioresponses() as mock_http:
             mock_http.post(
@@ -602,7 +602,7 @@ async def test_direct_uploads_pdf_parser_injects_plugin():
         async def mock_inline_owui_file_id(file_id, *args, **kwargs):
             return InlinedFile(data_url=f"data:application/pdf;base64,{_pdf_like_base64()}", filename="doc.pdf")
 
-        pipe._multimodal_handler._inline_owui_file_id = mock_inline_owui_file_id
+        pipe._file_gateway.inline_owui_file_id = mock_inline_owui_file_id
 
         with aioresponses() as mock_http:
             mock_http.post(
@@ -681,7 +681,7 @@ async def test_inject_direct_uploads_handles_none_content():
         async def mock_inline_owui_file_id(file_id, *args, **kwargs):
             return InlinedFile(data_url=f"data:application/pdf;base64,{_pdf_like_base64()}", filename="doc.pdf")
 
-        pipe._multimodal_handler._inline_owui_file_id = mock_inline_owui_file_id
+        pipe._file_gateway.inline_owui_file_id = mock_inline_owui_file_id
 
         with aioresponses() as mock_http:
             mock_http.post(
@@ -799,7 +799,7 @@ async def test_inject_direct_uploads_unsupported_content_type():
 
 
 @pytest.mark.asyncio
-async def test_sniff_audio_format_wav():
+async def test_sniff_audio_format_wav(monkeypatch):
     """Test audio format sniffing for WAV files.
 
     Covers lines 177-178: WAV detection via RIFF/WAVE signature.
@@ -825,8 +825,8 @@ async def test_sniff_audio_format_wav():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_wav_like_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_wav_like_base64())
 
         async def event_emitter(event):
             pass
@@ -875,7 +875,189 @@ async def test_sniff_audio_format_wav():
 
 
 @pytest.mark.asyncio
-async def test_sniff_audio_format_mp3_id3():
+async def test_native_audio_read_threads_resolved_user(monkeypatch):
+    """Native audio reads must thread the resolved user into the gateway read.
+
+    Proves the orchestrator resolves user_model and passes user=<resolved user>
+    to read_file_record_base64, the gateway's authorization chokepoint.
+    """
+    pipe = Pipe()
+
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+
+        metadata: dict[str, Any] = {
+            "chat_id": "chat_123",
+            "model": {"id": "openai/gpt-4o-mini"},
+            "openrouter_pipe": {
+                "direct_uploads": {
+                    "audio": [{"id": "audio_1"}],
+                }
+            },
+        }
+
+        captured_payloads: list[dict] = []
+        callback = _smart_callback(captured_payloads, "Response")
+
+        resolved_user = MagicMock(name="resolved_user")
+        resolved_user.id = "user_123"
+        monkeypatch.setattr(
+            "open_webui_openrouter_pipe.requests.orchestrator.get_user_by_id",
+            AsyncMock(return_value=resolved_user),
+        )
+
+        mock_file_obj = MagicMock()
+        mock_file_obj.id = "audio_1"
+        monkeypatch.setattr(
+            "open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id",
+            AsyncMock(return_value=mock_file_obj),
+        )
+        read_mock = AsyncMock(return_value=_wav_like_base64())
+        pipe._file_gateway.read_file_record_base64 = read_mock
+
+        async def event_emitter(event):
+            pass
+
+        with aioresponses() as mock_http:
+            mock_http.post(
+                "https://openrouter.ai/api/v1/responses",
+                callback=callback,
+                repeat=True,
+            )
+            mock_http.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                callback=callback,
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload={"data": [{"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"}]},
+                repeat=True,
+            )
+
+            body = {
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "listen"}],
+                "stream": True,
+            }
+
+            result = await pipe.pipe(
+                body=body,
+                __user__={"id": "user_123"},
+                __request__=None,
+                __event_emitter__=event_emitter,
+                __event_call__=None,
+                __metadata__=metadata,
+                __tools__=None,
+                __task__=None,
+                __task_body__=None,
+            )
+
+            await _consume_stream(result)
+
+        read_mock.assert_awaited()
+        assert read_mock.await_args.kwargs.get("user") is resolved_user
+
+    finally:
+        await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_native_audio_unauthorized_read_is_surfaced(monkeypatch):
+    """An unauthorized native read must abort before any OpenRouter request.
+
+    The gateway raises RequiredInternalFileError; the orchestrator must surface
+    it (emit an error, return empty) rather than silently proceeding.
+    """
+    from open_webui_openrouter_pipe.core.errors import RequiredInternalFileError
+
+    pipe = Pipe()
+
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+
+        metadata: dict[str, Any] = {
+            "chat_id": "chat_123",
+            "model": {"id": "openai/gpt-4o-mini"},
+            "openrouter_pipe": {
+                "direct_uploads": {
+                    "audio": [{"id": "audio_1"}],
+                }
+            },
+        }
+
+        captured_payloads: list[dict] = []
+        callback = _smart_callback(captured_payloads, "Response")
+
+        monkeypatch.setattr(
+            "open_webui_openrouter_pipe.requests.orchestrator.get_user_by_id",
+            AsyncMock(return_value=MagicMock(id="user_123")),
+        )
+
+        mock_file_obj = MagicMock()
+        mock_file_obj.id = "audio_1"
+        monkeypatch.setattr(
+            "open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id",
+            AsyncMock(return_value=mock_file_obj),
+        )
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(
+            side_effect=RequiredInternalFileError(
+                "You do not have access to a referenced file.", denied=True
+            )
+        )
+
+        async def event_emitter(event):
+            pass
+
+        with aioresponses() as mock_http:
+            mock_http.post(
+                "https://openrouter.ai/api/v1/responses",
+                callback=callback,
+                repeat=True,
+            )
+            mock_http.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                callback=callback,
+                repeat=True,
+            )
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload={"data": [{"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"}]},
+                repeat=True,
+            )
+
+            body = {
+                "model": "openai/gpt-4o-mini",
+                "messages": [{"role": "user", "content": "listen"}],
+                "stream": True,
+            }
+
+            result = await pipe.pipe(
+                body=body,
+                __user__={"id": "user_123"},
+                __request__=None,
+                __event_emitter__=event_emitter,
+                __event_call__=None,
+                __metadata__=metadata,
+                __tools__=None,
+                __task__=None,
+                __task_body__=None,
+            )
+
+            consumed = await _consume_stream(result)
+
+        assert captured_payloads == []
+        assert "Direct Upload" in consumed
+        assert "Response" not in consumed
+
+    finally:
+        await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_sniff_audio_format_mp3_id3(monkeypatch):
     """Test audio format sniffing for MP3 with ID3 header.
 
     Covers lines 179-180: MP3 detection via ID3 signature.
@@ -901,8 +1083,8 @@ async def test_sniff_audio_format_mp3_id3():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_mp3_like_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_mp3_like_base64())
 
         async def event_emitter(event):
             pass
@@ -951,7 +1133,7 @@ async def test_sniff_audio_format_mp3_id3():
 
 
 @pytest.mark.asyncio
-async def test_sniff_audio_format_mp3_sync():
+async def test_sniff_audio_format_mp3_sync(monkeypatch):
     """Test audio format sniffing for MP3 with sync word.
 
     Covers lines 181-182: MP3 detection via sync word.
@@ -977,8 +1159,8 @@ async def test_sniff_audio_format_mp3_sync():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_mp3_sync_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_mp3_sync_base64())
 
         async def event_emitter(event):
             pass
@@ -1027,7 +1209,7 @@ async def test_sniff_audio_format_mp3_sync():
 
 
 @pytest.mark.asyncio
-async def test_sniff_audio_format_m4a():
+async def test_sniff_audio_format_m4a(monkeypatch):
     """Test audio format sniffing for M4A files.
 
     Covers lines 183-185: M4A detection via ftyp signature.
@@ -1053,8 +1235,8 @@ async def test_sniff_audio_format_m4a():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_m4a_like_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_m4a_like_base64())
 
         async def event_emitter(event):
             pass
@@ -1104,7 +1286,7 @@ async def test_sniff_audio_format_m4a():
 
 
 @pytest.mark.asyncio
-async def test_sniff_audio_format_flac():
+async def test_sniff_audio_format_flac(monkeypatch):
     """Test audio format sniffing for FLAC files.
 
     Covers lines 186-187: FLAC detection via fLaC signature.
@@ -1130,8 +1312,8 @@ async def test_sniff_audio_format_flac():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_flac_like_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_flac_like_base64())
 
         async def event_emitter(event):
             pass
@@ -1180,7 +1362,7 @@ async def test_sniff_audio_format_flac():
 
 
 @pytest.mark.asyncio
-async def test_sniff_audio_format_ogg():
+async def test_sniff_audio_format_ogg(monkeypatch):
     """Test audio format sniffing for OGG files.
 
     Covers lines 188-189: OGG detection via OggS signature.
@@ -1206,8 +1388,8 @@ async def test_sniff_audio_format_ogg():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_ogg_like_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_ogg_like_base64())
 
         async def event_emitter(event):
             pass
@@ -1256,7 +1438,7 @@ async def test_sniff_audio_format_ogg():
 
 
 @pytest.mark.asyncio
-async def test_sniff_audio_format_webm():
+async def test_sniff_audio_format_webm(monkeypatch):
     """Test audio format sniffing for WebM files.
 
     Covers lines 190-191: WebM detection via EBML header.
@@ -1282,8 +1464,8 @@ async def test_sniff_audio_format_webm():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_webm_like_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_webm_like_base64())
 
         async def event_emitter(event):
             pass
@@ -1332,7 +1514,7 @@ async def test_sniff_audio_format_webm():
 
 
 @pytest.mark.asyncio
-async def test_audio_with_explicit_format():
+async def test_audio_with_explicit_format(monkeypatch):
     """Test audio upload with explicit format specified.
 
     Covers the path where declared format is used directly.
@@ -1358,9 +1540,9 @@ async def test_audio_with_explicit_format():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
         # Return generic base64 - sniffing won't find format, but declared format used
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(
             return_value=base64.b64encode(b"some audio data").decode("ascii")
         )
 
@@ -1411,7 +1593,7 @@ async def test_audio_with_explicit_format():
 
 
 @pytest.mark.asyncio
-async def test_audio_format_allowlist_from_metadata():
+async def test_audio_format_allowlist_from_metadata(monkeypatch):
     """Test that responses_audio_format_allowlist from metadata is used.
 
     Covers lines 221-224: custom allowlist for audio formats.
@@ -1438,8 +1620,8 @@ async def test_audio_format_allowlist_from_metadata():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(
             return_value=base64.b64encode(b"OggS" + b"\x00" * 28).decode("ascii")
         )
 
@@ -1491,7 +1673,7 @@ async def test_audio_format_allowlist_from_metadata():
 
 
 @pytest.mark.asyncio
-async def test_audio_file_not_found_error():
+async def test_audio_file_not_found_error(monkeypatch):
     """Test error when audio file cannot be loaded.
 
     Covers line 232: raise ValueError when file_obj is None.
@@ -1513,7 +1695,7 @@ async def test_audio_file_not_found_error():
         }
 
         # Mock file not found
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=None)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=None))
 
         emitted_events: list[dict] = []
 
@@ -1554,7 +1736,7 @@ async def test_audio_file_not_found_error():
 
 
 @pytest.mark.asyncio
-async def test_audio_file_encode_error():
+async def test_audio_file_encode_error(monkeypatch):
     """Test error when audio file cannot be encoded.
 
     Covers lines 234-235: raise ValueError when b64 encoding fails.
@@ -1577,8 +1759,8 @@ async def test_audio_file_encode_error():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "bad_audio"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=None)  # Encoding fails
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=None)  # Encoding fails
 
         emitted_events: list[dict] = []
 
@@ -1618,7 +1800,7 @@ async def test_audio_file_encode_error():
 
 
 @pytest.mark.asyncio
-async def test_audio_missing_format_error():
+async def test_audio_missing_format_error(monkeypatch):
     """Test error when audio format cannot be determined.
 
     Covers lines 240-241: raise ValueError when format is missing.
@@ -1641,9 +1823,9 @@ async def test_audio_missing_format_error():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "unknown_audio"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
         # Return data that doesn't match any known signature
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(
             return_value=base64.b64encode(b"random garbage data").decode("ascii")
         )
 
@@ -1690,7 +1872,7 @@ async def test_audio_missing_format_error():
 
 
 @pytest.mark.asyncio
-async def test_video_upload_injection():
+async def test_video_upload_injection(monkeypatch):
     """Test video file upload injection into messages.
 
     Covers lines 252-270: video file handling and data URL construction.
@@ -1716,8 +1898,8 @@ async def test_video_upload_injection():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "video_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_mp4_video_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_mp4_video_base64())
 
         async def event_emitter(event):
             pass
@@ -1762,7 +1944,7 @@ async def test_video_upload_injection():
 
 
 @pytest.mark.asyncio
-async def test_video_file_not_found_error():
+async def test_video_file_not_found_error(monkeypatch):
     """Test error when video file cannot be loaded.
 
     Covers lines 257-258: raise ValueError when video file_obj is None.
@@ -1783,7 +1965,7 @@ async def test_video_file_not_found_error():
             },
         }
 
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=None)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=None))
 
         emitted_events: list[dict] = []
 
@@ -1823,7 +2005,7 @@ async def test_video_file_not_found_error():
 
 
 @pytest.mark.asyncio
-async def test_video_infers_mime_type():
+async def test_video_infers_mime_type(monkeypatch):
     """Test that video MIME type is inferred when not provided.
 
     Covers lines 263-264: MIME type inference from file_obj.
@@ -1850,9 +2032,9 @@ async def test_video_infers_mime_type():
         mock_file_obj = MagicMock()
         mock_file_obj.id = "video_1"
         mock_file_obj.meta = {"content_type": "video/webm"}
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_mp4_video_base64())
-        pipe._multimodal_handler._infer_file_mime_type = MagicMock(return_value="video/webm")
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_mp4_video_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.infer_file_mime_type", MagicMock(return_value="video/webm"))
 
         async def event_emitter(event):
             pass
@@ -1896,7 +2078,7 @@ async def test_video_infers_mime_type():
 
 
 @pytest.mark.asyncio
-async def test_video_file_encode_error():
+async def test_video_file_encode_error(monkeypatch):
     """Test error when video file cannot be encoded.
 
     Covers lines 260-261: raise ValueError when video b64 encoding fails.
@@ -1919,8 +2101,8 @@ async def test_video_file_encode_error():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "bad_video"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=None)  # Encoding fails
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=None)  # Encoding fails
 
         emitted_events: list[dict] = []
 
@@ -2048,7 +2230,7 @@ async def test_direct_uploads_warnings_emitted():
 
 
 @pytest.mark.asyncio
-async def test_endpoint_override_conflict_with_forced_responses():
+async def test_endpoint_override_conflict_with_forced_responses(monkeypatch):
     """Test error when video requires chat_completions but model forced to responses.
 
     Covers lines 398-413: endpoint override conflict handling.
@@ -2073,8 +2255,8 @@ async def test_endpoint_override_conflict_with_forced_responses():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "video_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_mp4_video_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_mp4_video_base64())
 
         emitted_events: list[dict] = []
 
@@ -3059,7 +3241,7 @@ async def test_tool_rename_debug_logging(caplog):
 
 
 @pytest.mark.asyncio
-async def test_decode_base64_prefix_empty_data():
+async def test_decode_base64_prefix_empty_data(monkeypatch):
     """Test _decode_base64_prefix returns empty bytes when data is empty string.
 
     Covers line 147: return b"" when not data.
@@ -3082,9 +3264,9 @@ async def test_decode_base64_prefix_empty_data():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
         # Return empty string - triggers line 147: return b""
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value="")
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value="")
 
         emitted_events: list[dict] = []
 
@@ -3124,7 +3306,7 @@ async def test_decode_base64_prefix_empty_data():
 
 
 @pytest.mark.asyncio
-async def test_decode_base64_prefix_invalid_chars():
+async def test_decode_base64_prefix_invalid_chars(monkeypatch):
     """Test _decode_base64_prefix returns empty bytes for invalid base64 characters.
 
     Covers line 160: return b"" when invalid character found.
@@ -3147,9 +3329,9 @@ async def test_decode_base64_prefix_invalid_chars():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
         # Return data with invalid characters (Japanese chars have ord > 127)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value="invalid\u3000base64data")
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value="invalid\u3000base64data")
 
         emitted_events: list[dict] = []
 
@@ -3189,7 +3371,7 @@ async def test_decode_base64_prefix_invalid_chars():
 
 
 @pytest.mark.asyncio
-async def test_decode_base64_prefix_invalid_base64_structure():
+async def test_decode_base64_prefix_invalid_base64_structure(monkeypatch):
     """Test _decode_base64_prefix handles malformed base64 with fallback decode.
 
     Covers lines 165-169: base64 decode exceptions with fallback.
@@ -3212,10 +3394,10 @@ async def test_decode_base64_prefix_invalid_base64_structure():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
         # Valid base64 chars but structurally wrong (will try fallback decode)
         # Using valid chars but random content that might fail strict decode
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value="AAAA====AAAA")
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value="AAAA====AAAA")
 
         emitted_events: list[dict] = []
 
@@ -3259,7 +3441,7 @@ async def test_decode_base64_prefix_invalid_base64_structure():
 
 
 @pytest.mark.asyncio
-async def test_sniff_audio_format_empty_prefix():
+async def test_sniff_audio_format_empty_prefix(monkeypatch):
     """Test _sniff_audio_format returns empty string when prefix is empty.
 
     Covers line 176: return "" when not prefix.
@@ -3284,9 +3466,9 @@ async def test_sniff_audio_format_empty_prefix():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_empty"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
         # Return None data - this will fail encoding check before sniffing
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=None)
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=None)
 
         emitted_events: list[dict] = []
 
@@ -3366,7 +3548,7 @@ async def test_files_loop_skips_invalid_file_id():
         async def mock_inline_owui_file_id(file_id, *args, **kwargs):
             return InlinedFile(data_url=f"data:application/pdf;base64,{_pdf_like_base64()}", filename="doc.pdf")
 
-        pipe._multimodal_handler._inline_owui_file_id = mock_inline_owui_file_id
+        pipe._file_gateway.inline_owui_file_id = mock_inline_owui_file_id
 
         with aioresponses() as mock_http:
             mock_http.post(
@@ -3408,7 +3590,7 @@ async def test_files_loop_skips_invalid_file_id():
 
 
 @pytest.mark.asyncio
-async def test_audio_loop_skips_invalid_file_id():
+async def test_audio_loop_skips_invalid_file_id(monkeypatch):
     """Test that audio loop skips items with invalid file_id.
 
     Covers line 229: continue when audio file_id is not valid.
@@ -3438,8 +3620,8 @@ async def test_audio_loop_skips_invalid_file_id():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "valid_audio"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_mp3_like_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_mp3_like_base64())
 
         async def event_emitter(event):
             pass
@@ -3488,7 +3670,7 @@ async def test_audio_loop_skips_invalid_file_id():
 
 
 @pytest.mark.asyncio
-async def test_video_loop_skips_invalid_file_id():
+async def test_video_loop_skips_invalid_file_id(monkeypatch):
     """Test that video loop skips items with invalid file_id.
 
     Covers line 255: continue when video file_id is not valid.
@@ -3518,8 +3700,8 @@ async def test_video_loop_skips_invalid_file_id():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "valid_video"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_mp4_video_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_mp4_video_base64())
 
         async def event_emitter(event):
             pass
@@ -3568,7 +3750,7 @@ async def test_video_loop_skips_invalid_file_id():
 
 
 @pytest.mark.asyncio
-async def test_csv_set_with_non_string_value():
+async def test_csv_set_with_non_string_value(monkeypatch):
     """Test _csv_set returns empty set when value is not a string.
 
     Covers line 213: return set() when value is not string.
@@ -3597,8 +3779,8 @@ async def test_csv_set_with_non_string_value():
 
         mock_file_obj = MagicMock()
         mock_file_obj.id = "audio_1"
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file_obj)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=_mp3_like_base64())
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file_obj))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=_mp3_like_base64())
 
         async def event_emitter(event):
             pass

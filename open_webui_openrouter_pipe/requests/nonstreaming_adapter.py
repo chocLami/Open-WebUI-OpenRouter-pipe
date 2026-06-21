@@ -51,6 +51,7 @@ class NonStreamingAdapter:
         valves: "Pipe.Valves | None" = None,
         endpoint_override: Literal["responses", "chat_completions"] | None = None,
         breaker_key: Optional[str] = None,
+        user: Any = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Send a non-streaming request and yield Responses-style events."""
         effective_valves = valves or self._pipe.valves
@@ -83,6 +84,7 @@ class NonStreamingAdapter:
                 api_key=api_key,
                 base_url=base_url,
                 valves=effective_valves,
+                user=user,
             )
             output_items = response.get("output") if isinstance(response, dict) else None
             if isinstance(output_items, list):
@@ -115,6 +117,7 @@ class NonStreamingAdapter:
                 base_url=base_url,
                 valves=effective_valves,
                 breaker_key=breaker_key,
+                user=user,
             )
             choices = chat_response.get("choices") if isinstance(chat_response, dict) else None
             message = None

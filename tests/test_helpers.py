@@ -1442,9 +1442,10 @@ def test_filter_openrouter_request_drops_invalid_keys():
 
 
 def test_internal_file_helpers():
-    uid = ow._extract_internal_file_id("https://host/files/ABC/")
+    uid = ow.extract_internal_file_id("https://host/files/ABC/")
     assert uid == "ABC"
-    assert ow._is_internal_file_url("https://x/api/v1/files/123") is True
+    assert ow.is_internal_file_url("/api/v1/files/123") is True
+    assert ow.is_internal_file_url("https://x/api/v1/files/123") is False
 
 
 @pytest.mark.asyncio

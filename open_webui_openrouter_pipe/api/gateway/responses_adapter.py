@@ -77,16 +77,18 @@ class ResponsesAdapter:
         chunk_queue_warn_size: int = 1000,
         event_queue_maxsize: int = 100,
         event_queue_warn_size: int = 1000,
+        user: Any = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Producer/worker SSE pipeline with configurable delta batching."""
 
         effective_valves = valves or self._pipe.valves
         chunk_size = effective_valves.IMAGE_UPLOAD_CHUNK_BYTES
         max_bytes = effective_valves.BASE64_MAX_SIZE_MB * 1024 * 1024
-        await self._pipe._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await self._pipe._file_gateway.inline_internal_responses_input_files_inplace(
             request_body,
             chunk_size=chunk_size,
             max_bytes=max_bytes,
+            user=user,
         )
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -452,15 +454,17 @@ class ResponsesAdapter:
         *,
         valves: Pipe.Valves | None = None,
         breaker_key: Optional[str] = None,
+        user: Any = None,
     ) -> Dict[str, Any]:
         """Send a blocking request to the Responses API and return the JSON payload."""
         effective_valves = valves or self._pipe.valves
         chunk_size = effective_valves.IMAGE_UPLOAD_CHUNK_BYTES
         max_bytes = effective_valves.BASE64_MAX_SIZE_MB * 1024 * 1024
-        await self._pipe._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await self._pipe._file_gateway.inline_internal_responses_input_files_inplace(
             request_params,
             chunk_size=chunk_size,
             max_bytes=max_bytes,
+            user=user,
         )
         headers = {
             "Authorization": f"Bearer {api_key}",

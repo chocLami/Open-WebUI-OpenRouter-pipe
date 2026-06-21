@@ -38,9 +38,9 @@ from ..core.utils import (
 )
 
 # Import from storage
-from ..storage.multimodal import (
-    _extract_internal_file_id,
-    _is_internal_file_url,
+from ..storage.owui_files import (
+    extract_internal_file_id,
+    is_internal_file_url,
 )
 
 # Import from persistence
@@ -57,7 +57,7 @@ from ..core.config import (
 from ..models.registry import ModelFamily, supports_phase_model
 
 # Import status messages
-from ..core.errors import StatusMessages
+from ..core.errors import StatusMessages, RequiredInternalFileError
 
 # Import Anthropic integration
 from ..integrations.anthropic import _maybe_apply_anthropic_prompt_caching
@@ -450,8 +450,16 @@ async def transform_messages_to_input(
                 cleaned = _sanitize_free_text(content_blocks)
                 content_blocks = [{"type": "text", "text": cleaned}] if cleaned else []
 
-            async def _to_input_image(block: dict) -> Optional[dict[str, Any]]:
+            async def _to_input_image(block: dict, *, required: bool = True) -> Optional[dict[str, Any]]:
                 """Convert Open WebUI image block into Responses format.
+
+                When ``required`` is True (current-user message attachments), a
+                current-user internal OWUI image that cannot be authorised or
+                materialised raises ``RequiredInternalFileError`` so the request
+                aborts visibly instead of silently dropping it. When ``required``
+                is False (best-effort reuse of historical/assistant images), the
+                same failure emits a visible warning and skips, never forwarding
+                the internal URL.
 
                 Handles image URLs and base64 data URLs, downloading remote images and
                 saving all images to OWUI storage to prevent data loss. HTTP is disabled
@@ -503,7 +511,7 @@ async def transform_messages_to_input(
                     if not url:
                         return None
 
-                    if url.startswith("http://") and not _is_internal_file_url(url):
+                    if url.startswith("http://") and not is_internal_file_url(url):
                         if not pipe._multimodal_handler._is_insecure_http_allowed(url):
                             pipe.logger.error("Blocked insecure HTTP image URL by default: %s", url)
                             await pipe._ensure_error_formatter()._emit_error(
@@ -520,7 +528,7 @@ async def transform_messages_to_input(
                         """Resolve (request,user) tuple only once for storage uploads."""
                         nonlocal storage_context
                         if storage_context is None:
-                            storage_context = await pipe._multimodal_handler._resolve_storage_context(__request__, user_obj)
+                            storage_context = await pipe._file_gateway.resolve_storage_context(__request__, user_obj)
                         return storage_context
 
                     async def _save_image_bytes(
@@ -533,7 +541,7 @@ async def transform_messages_to_input(
                         upload_request, upload_user = await _get_storage_context()
                         if not (upload_request and upload_user):
                             return None
-                        stored_id = await pipe._multimodal_handler._upload_to_owui_storage(
+                        stored_id = await pipe._file_gateway.upload_to_owui_storage(
                             request=upload_request,
                             user=upload_user,
                             file_data=payload,
@@ -568,7 +576,7 @@ async def transform_messages_to_input(
                                 show_error_message=False
                             )
 
-                    elif url.startswith(("http://", "https://")) and not _is_internal_file_url(url):
+                    elif url.startswith(("http://", "https://")) and not is_internal_file_url(url):
                         try:
                             downloaded = await pipe._multimodal_handler._download_remote_url(url)
                             if downloaded:
@@ -592,20 +600,26 @@ async def transform_messages_to_input(
                                 f"Failed to download image: {exc}",
                                 show_error_message=False
                             )
-                    if owui_file_id is None and _is_internal_file_url(url):
-                        owui_file_id = _extract_internal_file_id(url)
+                    if owui_file_id is None and is_internal_file_url(url):
+                        owui_file_id = extract_internal_file_id(url)
 
                     if owui_file_id:
-                        inlined = await pipe._multimodal_handler._inline_owui_file_id(
+                        inlined = await pipe._file_gateway.inline_owui_file_id(
                             owui_file_id,
                             chunk_size=chunk_size,
                             max_bytes=max_inline_bytes,
+                            user=user_obj,
                         )
                         if not inlined:
-                            await pipe._event_emitter_handler._emit_status(
+                            if required:
+                                raise RequiredInternalFileError(
+                                    f"A referenced image ({owui_file_id}) could not be retrieved from Open WebUI storage.",
+                                    kind="image",
+                                )
+                            await pipe._ensure_error_formatter()._emit_error(
                                 event_emitter,
                                 f"Skipping image {owui_file_id}: Open WebUI file unavailable.",
-                                done=False,
+                                show_error_message=True,
                             )
                             return None
                         url = inlined.data_url
@@ -618,6 +632,8 @@ async def transform_messages_to_input(
 
                     return result
 
+                except RequiredInternalFileError:
+                    raise
                 except Exception as exc:
                     pipe.logger.error(f"Error in _to_input_image: {exc}")
                     await pipe._ensure_error_formatter()._emit_error(
@@ -674,17 +690,13 @@ async def transform_messages_to_input(
                     file_url = source.get("file_url")
                     file_url_set_from_file_data = False
 
-                    def _is_internal_storage(url: str) -> bool:
-                        """Return True when a URL already references internal storage."""
-                        return isinstance(url, str) and ("/api/v1/files/" in url or "/files/" in url)
-
                     storage_context: Optional[Tuple[Optional[Request], Optional[Any]]] = None
 
                     async def _get_storage_context() -> tuple[Optional[Request], Optional[Any]]:
                         """Lazy-load the request/user pair used for uploads."""
                         nonlocal storage_context
                         if storage_context is None:
-                            storage_context = await pipe._multimodal_handler._resolve_storage_context(__request__, user_obj)
+                            storage_context = await pipe._file_gateway.resolve_storage_context(__request__, user_obj)
                         return storage_context
 
                     async def _save_bytes_to_storage(
@@ -704,7 +716,7 @@ async def transform_messages_to_input(
                             ext = safe_mime.split("/")[-1]
                             fname = f"{fname}.{ext}"
 
-                        stored_id = await pipe._multimodal_handler._upload_to_owui_storage(
+                        stored_id = await pipe._file_gateway.upload_to_owui_storage(
                             request=upload_request,
                             user=upload_user,
                             file_data=payload,
@@ -744,13 +756,13 @@ async def transform_messages_to_input(
                         )
 
                     # Normalize internal OWUI URLs into a file_id (preferred).
-                    if isinstance(file_url, str) and file_url.strip() and _is_internal_file_url(file_url.strip()):
-                        extracted = _extract_internal_file_id(file_url.strip())
+                    if isinstance(file_url, str) and file_url.strip() and is_internal_file_url(file_url.strip()):
+                        extracted = extract_internal_file_id(file_url.strip())
                         if extracted:
                             file_id = extracted
                             file_url = None
-                    if isinstance(file_data, str) and file_data.strip() and _is_internal_file_url(file_data.strip()):
-                        extracted = _extract_internal_file_id(file_data.strip())
+                    if isinstance(file_data, str) and file_data.strip() and is_internal_file_url(file_data.strip()):
+                        extracted = extract_internal_file_id(file_data.strip())
                         if extracted:
                             file_id = extracted
                             file_data = None
@@ -783,7 +795,7 @@ async def transform_messages_to_input(
                                     show_error_message=False
                                 )
 
-                        elif file_data.startswith(("http://", "https://")) and not _is_internal_storage(file_data):
+                        elif file_data.startswith(("http://", "https://")) and not is_internal_file_url(file_data):
                             try:
                                 remote_url = file_data
                                 if remote_url.startswith("http://") and not pipe._multimodal_handler._is_insecure_http_allowed(remote_url):
@@ -857,7 +869,7 @@ async def transform_messages_to_input(
                                     f"Failed to save base64 file URL: {exc}",
                                     show_error_message=False
                                 )
-                        elif file_url.startswith(("http://", "https://")) and not _is_internal_storage(file_url):
+                        elif file_url.startswith(("http://", "https://")) and not is_internal_file_url(file_url):
                             try:
                                 name_hint = filename or file_url.split("/")[-1].split("?")[0]
                                 if file_url.startswith("http://") and not pipe._multimodal_handler._is_insecure_http_allowed(file_url):
@@ -901,7 +913,7 @@ async def transform_messages_to_input(
                     if (
                         isinstance(file_data, str)
                         and file_data.startswith("http://")
-                        and not _is_internal_storage(file_data)
+                        and not is_internal_file_url(file_data)
                         and not pipe._multimodal_handler._is_insecure_http_allowed(file_data)
                     ):
                         pipe.logger.error("Blocked insecure HTTP file_data URL by default: %s", file_data)
@@ -919,7 +931,7 @@ async def transform_messages_to_input(
                     if (
                         isinstance(file_url, str)
                         and file_url.startswith("http://")
-                        and not _is_internal_storage(file_url)
+                        and not is_internal_file_url(file_url)
                         and not pipe._multimodal_handler._is_insecure_http_allowed(file_url)
                     ):
                         pipe.logger.error("Blocked insecure HTTP file_url by default: %s", file_url)
@@ -1048,7 +1060,7 @@ async def transform_messages_to_input(
                     cleaned = "".join(data.split())
                     if not cleaned:
                         return None
-                    if not pipe._multimodal_handler._validate_base64_size(cleaned):
+                    if not pipe._file_gateway.validate_base64_size(cleaned):
                         return None
                     try:
                         base64.b64decode(cleaned, validate=True)
@@ -1153,7 +1165,7 @@ async def transform_messages_to_input(
                                     show_error_message=False,
                                 )
                                 return _empty_audio_block()
-                            if not pipe._multimodal_handler._validate_base64_size(parsed.get("b64", "")):
+                            if not pipe._file_gateway.validate_base64_size(parsed.get("b64", "")):
                                 return _empty_audio_block()
                             audio_format = _map_format(parsed.get("mime_type"))
                             return _build_audio_block(parsed.get("b64", ""), audio_format)
@@ -1200,7 +1212,10 @@ async def transform_messages_to_input(
                 Supported Video Formats:
                     - Remote URLs: YouTube links, direct video URLs
                     - Data URLs: data:video/mp4;base64,... (rarely used due to size)
-                    - OWUI file references: /api/v1/files/...
+
+                Internal OWUI file URLs are never forwarded or base64-inlined
+                (videos can reach VIDEO_MAX_SIZE_MB); they hard-fail via
+                ``RequiredInternalFileError`` so the internal URL never leaks.
 
                 Chat Completions Video Format:
                     {
@@ -1241,9 +1256,14 @@ async def transform_messages_to_input(
                         pipe.logger.warning("Video block has no URL")
                         return {"type": "video_url", "video_url": {"url": ""}}
 
+                    if is_internal_file_url(url):
+                        raise RequiredInternalFileError(
+                            "Internal video URLs cannot be forwarded to the provider.",
+                            kind="video",
+                        )
+
                     if (
                         url.startswith("http://")
-                        and not ("/api/v1/files/" in url or "/files/" in url)
                         and not pipe._multimodal_handler._is_insecure_http_allowed(url)
                     ):
                         pipe.logger.error("Blocked insecure HTTP video URL by default: %s", url)
@@ -1286,8 +1306,7 @@ async def transform_messages_to_input(
                             StatusMessages.VIDEO_YOUTUBE,
                             done=False
                         )
-                    elif url.startswith(("http://", "https://")) and not ("/api/v1/files/" in url or "/files/" in url):
-                        # Apply SSRF protection for non-OWUI URLs (HTTP disabled by default)
+                    elif url.startswith(("http://", "https://")):
                         if not await pipe._multimodal_handler._is_safe_url(url):
                             pipe.logger.error(f"SSRF protection blocked video URL: {url}")
                             await pipe._ensure_error_formatter()._emit_error(
@@ -1316,6 +1335,8 @@ async def transform_messages_to_input(
                         }
                     }
 
+                except RequiredInternalFileError:
+                    raise
                 except Exception as exc:
                     pipe.logger.error(f"Error in _to_input_video: {exc}")
                     await pipe._ensure_error_formatter()._emit_error(
@@ -1391,6 +1412,8 @@ async def transform_messages_to_input(
                     if is_image_block and result:
                         user_images_used += 1
                     converted_blocks.append(result)
+                except RequiredInternalFileError:
+                    raise
                 except Exception as exc:
                     pipe.logger.error(f"Failed to transform block type '{block_type}': {exc}")
                     await pipe._ensure_error_formatter()._emit_error(
@@ -1412,9 +1435,11 @@ async def transform_messages_to_input(
                 fallback_blocks: list[dict[str, Any]] = []
                 for source_block in last_assistant_images[:fallback_slots]:
                     try:
-                        transformed = await _to_input_image(source_block)
+                        transformed = await _to_input_image(source_block, required=False)
                         if transformed is not None:
                             fallback_blocks.append(transformed)
+                    except RequiredInternalFileError:
+                        raise
                     except Exception as exc:
                         pipe.logger.error("Failed to reuse assistant image: %s", exc)
                 if fallback_blocks:

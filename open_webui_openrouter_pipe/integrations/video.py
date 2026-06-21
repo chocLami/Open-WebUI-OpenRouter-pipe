@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from ..core.config import _PIPE_METADATA_KEY, _select_openrouter_http_referer
 from ..core.costs import maybe_dump_costs_snapshot
+from ..core.errors import RequiredInternalFileError
 from ..core.utils import (
     _clean_str,
     _csv_set,
@@ -26,6 +27,11 @@ from ..media import (
     make_thumbnail,
 )
 from ..models.registry import OpenRouterModelRegistry
+from ..storage.owui_files import (
+    get_file_by_id,
+    infer_file_mime_type,
+    materialize_owui_file_to_temp,
+)
 from ..storage.video_persistence import VideoPersistence
 from .video_client import OpenRouterVideoClient, extension_for_video_mime
 from .video_help import render_video_help
@@ -361,10 +367,18 @@ class VideoGenerationAdapter:
             await global_semaphore.acquire()
 
             video_meta = self._extract_video_metadata(metadata)
-            frame_images = await self._encode_frame_images(video_meta, video_model, valves)
-            input_references = await self._encode_input_references(video_meta, valves)
-            video_attachment_urls = await self._encode_video_attachments(video_meta, valves)
-            audio_attachment_url = await self._encode_audio_attachment(video_meta, valves)
+            frame_images = await self._encode_frame_images(
+                video_meta, video_model, valves, user_obj=user_obj or user,
+            )
+            input_references = await self._encode_input_references(
+                video_meta, valves, user_obj=user_obj or user,
+            )
+            video_attachment_urls = await self._encode_video_attachments(
+                video_meta, valves, user_obj=user_obj or user,
+            )
+            audio_attachment_url = await self._encode_audio_attachment(
+                video_meta, valves, user_obj=user_obj or user,
+            )
             provider_options = self._extract_provider_options(getattr(responses_body, "provider", None), metadata)
             payload = await self._build_payload(
                 api_model_id=api_model_id,
@@ -578,7 +592,7 @@ class VideoGenerationAdapter:
             extension = extension_for_video_mime(output_mime)
             if downloaded is None:
                 raise VideoGenerationError("Generated video download did not complete.")
-            file_id = await self._pipe._multimodal_handler._upload_to_owui_storage_from_path(
+            file_id = await self._pipe._file_gateway.upload_to_owui_storage_from_path(
                 request=request,
                 user=user_obj or user,
                 source_path=downloaded.path,
@@ -941,6 +955,8 @@ class VideoGenerationAdapter:
         video_meta: dict[str, Any],
         video_model: Any,
         valves: Any,
+        *,
+        user_obj: Any = None,
     ) -> list[dict[str, Any]]:
         raw_frames = video_meta.get("frame_images")
         if not isinstance(raw_frames, list) or not raw_frames:
@@ -969,14 +985,19 @@ class VideoGenerationAdapter:
                 )
             if frame_type in seen_frame_types:
                 continue
-            file_obj = await self._pipe._multimodal_handler._get_file_by_id(file_id)
+            file_obj = await get_file_by_id(file_id, self._pipe.logger)
             if not file_obj:
                 raise VideoGenerationError(f"Frame image '{file_id}' could not be loaded from Open WebUI storage.")
-            mime = self._pipe._multimodal_handler._infer_file_mime_type(file_obj)
+            mime = infer_file_mime_type(file_obj)
             mime = _clean_str(mime).split(";", 1)[0].lower()
             if mime not in allowed_mimes:
                 raise VideoGenerationError(f"Frame image MIME '{mime or 'unknown'}' is not allowed.")
-            b64 = await self._pipe._multimodal_handler._read_file_record_base64(file_obj, chunk_size, max_bytes)
+            try:
+                b64 = await self._pipe._file_gateway.read_file_record_base64(
+                    file_obj, chunk_size, max_bytes, user=user_obj,
+                )
+            except RequiredInternalFileError as exc:
+                raise VideoGenerationError(exc.user_message) from exc
             if not b64:
                 raise VideoGenerationError(f"Frame image '{file_id}' could not be encoded.")
             try:
@@ -1002,6 +1023,8 @@ class VideoGenerationAdapter:
         self,
         video_meta: dict[str, Any],
         valves: Any,
+        *,
+        user_obj: Any = None,
     ) -> list[dict[str, Any]]:
         """Encode prior-video frames intended as style/content reference images.
 
@@ -1030,20 +1053,23 @@ class VideoGenerationAdapter:
             file_id = _clean_str(item.get("id"))
             if not file_id:
                 continue
-            file_obj = await self._pipe._multimodal_handler._get_file_by_id(file_id)
+            file_obj = await get_file_by_id(file_id, self._pipe.logger)
             if not file_obj:
                 raise VideoGenerationError(
                     f"input_references image '{file_id}' could not be loaded from Open WebUI storage."
                 )
-            mime = self._pipe._multimodal_handler._infer_file_mime_type(file_obj)
+            mime = infer_file_mime_type(file_obj)
             mime = _clean_str(mime).split(";", 1)[0].lower()
             if mime not in allowed_mimes:
                 raise VideoGenerationError(
                     f"input_references image MIME '{mime or 'unknown'}' is not allowed."
                 )
-            b64 = await self._pipe._multimodal_handler._read_file_record_base64(
-                file_obj, chunk_size, max_bytes,
-            )
+            try:
+                b64 = await self._pipe._file_gateway.read_file_record_base64(
+                    file_obj, chunk_size, max_bytes, user=user_obj,
+                )
+            except RequiredInternalFileError as exc:
+                raise VideoGenerationError(exc.user_message) from exc
             if not b64:
                 raise VideoGenerationError(
                     f"input_references image '{file_id}' could not be encoded."
@@ -1071,20 +1097,27 @@ class VideoGenerationAdapter:
         item: dict[str, Any],
         valves: Any,
         kind: str,
+        *,
+        user_obj: Any = None,
     ) -> str:
         file_id = _clean_str(item.get("id"))
         if not file_id:
             raise VideoGenerationError(f"{kind} attachment is missing a file id.")
         chunk_size = int(getattr(valves, "IMAGE_UPLOAD_CHUNK_BYTES", 1024 * 1024))
         max_bytes = int(getattr(valves, "REMOTE_VIDEO_MAX_SIZE_MB", 500)) * 1024 * 1024
-        file_obj = await self._pipe._multimodal_handler._get_file_by_id(file_id)
+        file_obj = await get_file_by_id(file_id, self._pipe.logger)
         if not file_obj:
             raise VideoGenerationError(f"{kind} attachment '{file_id}' could not be loaded from Open WebUI storage.")
-        mime = self._pipe._multimodal_handler._infer_file_mime_type(file_obj)
+        mime = infer_file_mime_type(file_obj)
         mime = _clean_str(mime).split(";", 1)[0].lower() or _clean_str(item.get("content_type")).split(";", 1)[0].lower()
         if not mime:
             raise VideoGenerationError(f"{kind} attachment '{file_id}' has no detectable MIME type.")
-        b64 = await self._pipe._multimodal_handler._read_file_record_base64(file_obj, chunk_size, max_bytes)
+        try:
+            b64 = await self._pipe._file_gateway.read_file_record_base64(
+                file_obj, chunk_size, max_bytes, user=user_obj,
+            )
+        except RequiredInternalFileError as exc:
+            raise VideoGenerationError(exc.user_message) from exc
         if not b64:
             raise VideoGenerationError(f"{kind} attachment '{file_id}' could not be encoded.")
         return f"data:{mime};base64,{b64}"
@@ -1093,6 +1126,8 @@ class VideoGenerationAdapter:
         self,
         video_meta: dict[str, Any],
         valves: Any,
+        *,
+        user_obj: Any = None,
     ) -> list[str]:
         raw = video_meta.get("video_attachments")
         if not isinstance(raw, list) or not raw:
@@ -1100,20 +1135,28 @@ class VideoGenerationAdapter:
         urls: list[str] = []
         for item in raw:
             if isinstance(item, dict):
-                urls.append(await self._encode_attachment_data_url(item, valves, "Video"))
+                urls.append(
+                    await self._encode_attachment_data_url(
+                        item, valves, "Video", user_obj=user_obj,
+                    )
+                )
         return urls
 
     async def _encode_audio_attachment(
         self,
         video_meta: dict[str, Any],
         valves: Any,
+        *,
+        user_obj: Any = None,
     ) -> str:
         raw = video_meta.get("audio_attachments")
         if not isinstance(raw, list) or not raw:
             return ""
         for item in raw:
             if isinstance(item, dict):
-                return await self._encode_attachment_data_url(item, valves, "Audio")
+                return await self._encode_attachment_data_url(
+                    item, valves, "Audio", user_obj=user_obj,
+                )
         return ""
 
     def _extract_video_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -1357,8 +1400,10 @@ class VideoGenerationAdapter:
                     )
                     thumb_urls.append("")
                     continue
+                finally:
+                    tmp_path.unlink(missing_ok=True)
 
-                frame_file_id = await self._pipe._multimodal_handler._upload_to_owui_storage(
+                frame_file_id = await self._pipe._file_gateway.upload_to_owui_storage(
                     request=request,
                     user=user_obj,
                     file_data=frame.image_bytes,
@@ -1399,7 +1444,7 @@ class VideoGenerationAdapter:
 
                 try:
                     thumb = await asyncio.to_thread(make_thumbnail, frame.image_bytes)
-                    thumb_file_id = await self._pipe._multimodal_handler._upload_to_owui_storage(
+                    thumb_file_id = await self._pipe._file_gateway.upload_to_owui_storage(
                         request=request,
                         user=user_obj,
                         file_data=thumb.image_bytes,
@@ -1462,41 +1507,37 @@ class VideoGenerationAdapter:
         request: Any,
         user_obj: Any,
     ) -> Optional[Path]:
+        """Materialise a prior-video file to a private temp for best-effort frame extraction.
+
+        Authorises and routes the read through the OWUI Storage gateway (any
+        backend). Returns a caller-owned temp Path on success; returns None on
+        auth denial, size, containment, or any other failure so the caller can
+        degrade with a downgrade note. The caller must unlink the returned temp.
+        """
         del request
         try:
-            file_obj = await self._pipe._multimodal_handler._get_file_by_id(file_id)
+            file_obj = await get_file_by_id(file_id, self._pipe.logger)
             if file_obj is None:
                 return None
-            owner_id = getattr(file_obj, "user_id", None)
-            requester_id = getattr(user_obj, "id", None) if user_obj else None
-            if not owner_id or not requester_id or owner_id != requester_id:
+            max_bytes = int(self._pipe.valves.VIDEO_MAX_SIZE_MB) * 1024 * 1024
+            try:
+                temp = await materialize_owui_file_to_temp(
+                    file_obj,
+                    user=user_obj,
+                    logger=self._pipe.logger,
+                    max_bytes=max_bytes,
+                    allow_unknown_size=bool(
+                        getattr(self._pipe.valves, "ALLOW_UNKNOWN_SIZE_CLOUD_READS", False)
+                    ),
+                    allowed_suffixes={".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi"},
+                )
+            except RequiredInternalFileError as exc:
                 self.logger.warning(
-                    "video_intent: refusing cross-user file access (file_id=%s)", file_id,
+                    "video_intent: prior-video file unavailable (file_id=%s): %s",
+                    file_id, exc.user_message,
                 )
                 return None
-            raw_path = getattr(file_obj, "path", None)
-            if not raw_path:
-                return None
-            try:
-                src_path = Path(str(raw_path)).resolve(strict=True)
-            except (OSError, RuntimeError):
-                return None
-            if src_path.suffix.lower() not in {".mp4", ".webm", ".mov", ".mkv", ".m4v", ".avi"}:
-                self.logger.warning(
-                    "video_intent: rejecting non-video extension %s", src_path.suffix,
-                )
-                return None
-            try:
-                from open_webui.config import UPLOAD_DIR  # type: ignore[import-not-found]
-                allowed_root = Path(str(UPLOAD_DIR)).resolve(strict=True)
-                if not src_path.is_relative_to(allowed_root):
-                    self.logger.warning(
-                        "video_intent: file path escapes UPLOAD_DIR (%s)", src_path,
-                    )
-                    return None
-            except Exception:
-                pass
-            return src_path
+            return temp
         except asyncio.CancelledError:
             raise
         except Exception as exc:

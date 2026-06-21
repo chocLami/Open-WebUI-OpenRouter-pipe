@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 import json
 import logging
@@ -12,6 +13,7 @@ from typing import Any, cast
 import pytest
 
 from open_webui_openrouter_pipe import EncryptedStr, Pipe
+from open_webui_openrouter_pipe.core.errors import RequiredInternalFileError
 from open_webui_openrouter_pipe.filters import FilterManager
 from open_webui_openrouter_pipe.filters.video_filter_renderer import (
     build_video_filter_spec,
@@ -56,6 +58,13 @@ def _load_filter_from_source(source: str, module_name: str) -> ModuleType:
 
 def _test_logger() -> logging.Logger:
     return logging.getLogger("tests.video_generation")
+
+
+def _async_return(value: Any):
+    """Build an async callable that ignores its args and returns ``value``."""
+    async def _inner(*_args, **_kwargs):
+        return value
+    return _inner
 
 
 class _FakeContent:
@@ -207,7 +216,7 @@ async def test_video_lifecycle_bg_task_does_not_emit_chat_completion(monkeypatch
     monkeypatch.setattr("open_webui_openrouter_pipe.integrations.video.OpenRouterVideoClient", FakeClient)
     monkeypatch.setattr(pipe, "_create_http_session", lambda *_args, **_kwargs: _FakeSession([]))
     monkeypatch.setattr(pipe._multimodal_handler, "_download_remote_url_streaming", fake_streaming_download)
-    monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage_from_path", fake_upload_from_path)
+    monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage_from_path", fake_upload_from_path)
 
     captured: list[dict[str, Any]] = []
 
@@ -284,7 +293,7 @@ async def test_video_lifecycle_removes_temp_directory(monkeypatch):
     monkeypatch.setattr("open_webui_openrouter_pipe.integrations.video.OpenRouterVideoClient", FakeClient)
     monkeypatch.setattr(pipe, "_create_http_session", lambda *_args, **_kwargs: _FakeSession([]))
     monkeypatch.setattr(pipe._multimodal_handler, "_download_remote_url_streaming", fake_streaming_download)
-    monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage_from_path", fake_upload_from_path)
+    monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage_from_path", fake_upload_from_path)
 
     semaphore = asyncio.Semaphore(1)
     await semaphore.acquire()
@@ -789,9 +798,9 @@ async def test_video_adapter_pending_marker_resumes_without_submit(monkeypatch, 
             return {"status": "completed", "usage": {"cost": "0.25"}}
 
         # T0-A refactor: download/upload no longer go through the client. The adapter calls
-        # the canonical _download_remote_url_streaming + _upload_to_owui_storage_from_path on
-        # the multimodal handler. content_url/bearer_header just return the URL/headers the
-        # canonical helper consumes.
+        # the canonical _download_remote_url_streaming on the multimodal handler and
+        # upload_to_owui_storage_from_path on the file gateway. content_url/bearer_header
+        # just return the URL/headers the canonical helper consumes.
         def content_url(self, job_id: str) -> str:
             return f"https://example.test/videos/{job_id}/content"
 
@@ -814,7 +823,7 @@ async def test_video_adapter_pending_marker_resumes_without_submit(monkeypatch, 
     monkeypatch.setattr("open_webui_openrouter_pipe.integrations.video.OpenRouterVideoClient", FakeClient)
     monkeypatch.setattr(pipe, "_create_http_session", lambda *_args, **_kwargs: _FakeSession([]))
     monkeypatch.setattr(pipe._multimodal_handler, "_download_remote_url_streaming", fake_streaming_download)
-    monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage_from_path", fake_upload_from_path)
+    monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage_from_path", fake_upload_from_path)
 
     result = await adapter.generate(
         body={"messages": [{"role": "user", "content": "make a video"}]},
@@ -1532,6 +1541,73 @@ async def test_unsafe_url_in_passthrough_raises():
             video_model=VIDEO_BY_ID["alibaba/wan-2.7"],
             frame_images=[],
             provider_options={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_encode_frame_images_threads_user_into_gateway_read(monkeypatch):
+    """`_encode_frame_images` must pass the requester `user=user_obj` into the
+    gateway `read_file_record_base64` so the file read is authorised against the
+    requester rather than read unconditionally."""
+    pipe = Pipe()
+    adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
+    file_obj = SimpleNamespace(id="f1", user_id="u1", path="/srv/up/f1.png")
+    monkeypatch.setattr(
+        "open_webui_openrouter_pipe.integrations.video.get_file_by_id",
+        _async_return(file_obj),
+    )
+    monkeypatch.setattr(
+        "open_webui_openrouter_pipe.integrations.video.infer_file_mime_type",
+        lambda _obj: "image/png",
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_read(file_obj_arg, chunk_size, max_bytes, *, user=None, **_kwargs):
+        captured["user"] = user
+        return base64.b64encode(b"png-bytes").decode("ascii")
+
+    monkeypatch.setattr(pipe._file_gateway, "read_file_record_base64", fake_read)
+
+    user_obj = SimpleNamespace(id="u1")
+    encoded = await adapter._encode_frame_images(
+        {"frame_images": [{"id": "f1", "frame_type": "first_frame"}]},
+        VIDEO_BY_ID["google/veo-3.1"],
+        pipe.valves,
+        user_obj=user_obj,
+    )
+    assert len(encoded) == 1
+    assert encoded[0]["frame_type"] == "first_frame"
+    assert captured["user"] is user_obj
+
+
+@pytest.mark.asyncio
+async def test_encode_frame_images_converts_required_file_error_to_video_error(monkeypatch):
+    """A RequiredInternalFileError raised by the gateway for a required frame
+    attachment must surface as a VideoGenerationError (with the user message),
+    not leak the internal error type."""
+    pipe = Pipe()
+    adapter = VideoGenerationAdapter(pipe=pipe, logger=_test_logger())
+    file_obj = SimpleNamespace(id="f1", user_id="owner", path="/srv/up/f1.png")
+    monkeypatch.setattr(
+        "open_webui_openrouter_pipe.integrations.video.get_file_by_id",
+        _async_return(file_obj),
+    )
+    monkeypatch.setattr(
+        "open_webui_openrouter_pipe.integrations.video.infer_file_mime_type",
+        lambda _obj: "image/png",
+    )
+
+    async def fake_read(*_args, **_kwargs):
+        raise RequiredInternalFileError("You do not have access to a referenced file.", denied=True)
+
+    monkeypatch.setattr(pipe._file_gateway, "read_file_record_base64", fake_read)
+
+    with pytest.raises(VideoGenerationError, match="do not have access"):
+        await adapter._encode_frame_images(
+            {"frame_images": [{"id": "f1", "frame_type": "first_frame"}]},
+            VIDEO_BY_ID["google/veo-3.1"],
+            pipe.valves,
+            user_obj=SimpleNamespace(id="not-the-owner"),
         )
 
 

@@ -13,7 +13,7 @@ from open_webui_openrouter_pipe import (
     generate_item_id,
 )
 from open_webui_openrouter_pipe.requests.transformer import transform_messages_to_input
-from open_webui_openrouter_pipe.storage.multimodal import InlinedFile
+from open_webui_openrouter_pipe.storage.owui_files import InlinedFile
 
 
 def _assistant_message_with_markers(*markers: str) -> str:
@@ -151,10 +151,10 @@ async def test_transform_limits_user_images(monkeypatch, pipe_instance_async):
         if event.get("type") == "status":
             captured_status.append(event["data"]["description"])
 
-    async def fake_inline(file_id, chunk_size, max_bytes):
+    async def fake_inline(file_id, *, chunk_size=None, max_bytes=None, user=None):
         return InlinedFile(data_url=f"data:image/png;base64,{file_id}", filename=f"{file_id}.png")
 
-    monkeypatch.setattr(pipe._multimodal_handler, "_inline_owui_file_id", fake_inline)
+    monkeypatch.setattr(pipe._file_gateway, "inline_owui_file_id", fake_inline)
     ModelFamily.set_dynamic_specs({"vision-model": {"features": {"vision"}}})
     valves = pipe.valves.model_copy(update={"MAX_INPUT_IMAGES_PER_REQUEST": 1})
     messages = [
@@ -181,9 +181,9 @@ async def test_transform_limits_user_images(monkeypatch, pipe_instance_async):
 @pytest.mark.asyncio
 async def test_transform_falls_back_to_assistant_images(monkeypatch, pipe_instance_async):
     pipe = pipe_instance_async
-    async def fake_inline(file_id, chunk_size, max_bytes):
+    async def fake_inline(file_id, *, chunk_size=None, max_bytes=None, user=None):
         return InlinedFile(data_url=f"data:image/png;base64,{file_id}", filename=f"{file_id}.png")
-    monkeypatch.setattr(pipe._multimodal_handler, "_inline_owui_file_id", fake_inline)
+    monkeypatch.setattr(pipe._file_gateway, "inline_owui_file_id", fake_inline)
     ModelFamily.set_dynamic_specs({"vision-model": {"features": {"vision"}}})
     messages = [
         {
@@ -212,12 +212,12 @@ async def test_transform_falls_back_to_assistant_images(monkeypatch, pipe_instan
 async def test_transform_rehydration_drops_uninlineable_assistant_images(monkeypatch, pipe_instance_async):
     pipe = pipe_instance_async
 
-    async def fake_inline(file_id, chunk_size, max_bytes):  # type: ignore[no-untyped-def]
+    async def fake_inline(file_id, *, chunk_size=None, max_bytes=None, user=None):
         if file_id == "missing-img":
             return None
         return InlinedFile(data_url=f"data:image/png;base64,{file_id}", filename=f"{file_id}.png")
 
-    monkeypatch.setattr(pipe._multimodal_handler, "_inline_owui_file_id", fake_inline)
+    monkeypatch.setattr(pipe._file_gateway, "inline_owui_file_id", fake_inline)
     ModelFamily.set_dynamic_specs({"vision-model": {"features": {"vision"}}})
     messages = [
         {
@@ -250,10 +250,10 @@ async def test_transform_rehydration_drops_uninlineable_assistant_images(monkeyp
 async def test_transform_respects_user_turn_only_selection(monkeypatch, pipe_instance_async):
     pipe = pipe_instance_async
 
-    async def fake_inline(file_id, chunk_size, max_bytes):
+    async def fake_inline(file_id, *, chunk_size=None, max_bytes=None, user=None):
         return InlinedFile(data_url=f"data:image/png;base64,{file_id}", filename=f"{file_id}.png")
 
-    monkeypatch.setattr(pipe._multimodal_handler, "_inline_owui_file_id", fake_inline)
+    monkeypatch.setattr(pipe._file_gateway, "inline_owui_file_id", fake_inline)
     ModelFamily.set_dynamic_specs({"vision-model": {"features": {"vision"}}})
     valves = pipe.valves.model_copy(update={"IMAGE_INPUT_SELECTION": "user_turn_only"})
     messages = [
@@ -284,10 +284,10 @@ async def test_transform_skips_images_when_model_lacks_vision(monkeypatch, pipe_
         if event.get("type") == "status":
             captured_status.append(event["data"]["description"])
 
-    async def fake_inline(_file_id, chunk_size, max_bytes):
+    async def fake_inline(_file_id, *, chunk_size=None, max_bytes=None, user=None):
         return InlinedFile(data_url="data:image/png;base64,test", filename="test.png")
 
-    monkeypatch.setattr(pipe._multimodal_handler, "_inline_owui_file_id", fake_inline)
+    monkeypatch.setattr(pipe._file_gateway, "inline_owui_file_id", fake_inline)
     ModelFamily.set_dynamic_specs({"text-only": {"features": set()}})
     messages = [
         {

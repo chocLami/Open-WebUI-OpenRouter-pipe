@@ -3159,6 +3159,88 @@ class TestHandlePipeCallEdgeCases:
         finally:
             await pipe.close()
 
+    @pytest.mark.asyncio
+    async def test_handle_pipe_call_required_internal_file_error_aborts_before_dispatch(
+        self, monkeypatch
+    ):
+        """Eager transformer-pass RequiredInternalFileError surfaces user_message and skips OpenRouter.
+
+        Simulates the transformer raising during request construction. The typed
+        ``except RequiredInternalFileError`` must fire before the generic handler,
+        emit the file message as a visible error, make no provider HTTP call, and
+        return cleanly rather than a generic INTERNAL_ERROR.
+        """
+        from open_webui_openrouter_pipe.core.errors import RequiredInternalFileError
+        from open_webui_openrouter_pipe.models.registry import OpenRouterModelRegistry
+
+        pipe = Pipe()
+        pipe.valves.API_KEY = EncryptedStr("sk-test-key")
+        pipe.valves.ENABLE_VIDEO_GENERATION = False
+        pipe.valves.ENABLE_OPENROUTER_IMAGE_GENERATION = False
+
+        denied_message = "You do not have access to a referenced file."
+
+        async def _raise_required_file(*args, **kwargs):
+            raise RequiredInternalFileError(denied_message, denied=True)
+
+        emitted_events = []
+
+        async def mock_emitter(event):
+            emitted_events.append(event)
+
+        try:
+            await pipe._ensure_async_subsystems_initialized()
+            session = pipe._http_session
+
+            monkeypatch.setattr(
+                OpenRouterModelRegistry, "ensure_loaded", AsyncMock(return_value=None)
+            )
+            monkeypatch.setattr(OpenRouterModelRegistry, "list_models", lambda: [])
+            monkeypatch.setattr(
+                pipe, "_process_transformed_request", _raise_required_file
+            )
+
+            formatter = pipe._ensure_error_formatter()
+            emit_error_spy = AsyncMock(side_effect=formatter._emit_error)
+            emit_templated_spy = AsyncMock()
+            monkeypatch.setattr(formatter, "_emit_error", emit_error_spy)
+            monkeypatch.setattr(formatter, "_emit_templated_error", emit_templated_spy)
+
+            with aioresponses() as mock_http:
+                result = await pipe._handle_pipe_call(
+                    body={"messages": [{"role": "user", "content": "hi"}]},
+                    __user__={},
+                    __request__=None,
+                    __event_emitter__=mock_emitter,
+                    __event_call__=None,
+                    __metadata__={},
+                    __tools__=None,
+                    valves=pipe.valves,
+                    session=session,
+                )
+
+                assert result == ""
+                assert mock_http.requests == {}
+
+            emit_error_spy.assert_awaited_once()
+            await_args = emit_error_spy.await_args
+            assert await_args.args[1] == denied_message
+            assert await_args.kwargs.get("show_error_message") is True
+            assert await_args.kwargs.get("done") is True
+            emit_templated_spy.assert_not_awaited()
+
+            surfaced = [
+                e
+                for e in emitted_events
+                if isinstance(e, dict)
+                and e.get("type") == "chat:completion"
+                and e.get("data", {}).get("error", {}).get("message") == denied_message
+            ]
+            assert surfaced, "user_message not surfaced to the event emitter"
+            assert surfaced[0]["data"]["done"] is True
+        finally:
+            await pipe.close()
+
 
 # =============================================================================
 # TOOL EXECUTION TESTS
@@ -6679,41 +6761,54 @@ def test_sum_pricing_values_handles_non_numeric_non_container():
 
 
 # =============================================================================
-# ADDITIONAL COVERAGE TESTS - Multimodal Handler Delegation
+# ADDITIONAL COVERAGE TESTS - File Gateway Module-Func Delegation
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_get_file_by_id_delegates_to_handler():
-    """Test that _get_file_by_id delegates to MultimodalHandler."""
+async def test_inline_owui_file_id_uses_get_file_by_id_module_func(monkeypatch):
+    """The gateway resolves records through the storage.owui_files.get_file_by_id func."""
+    import open_webui_openrouter_pipe.storage.owui_files as owui_files
+
     pipe = Pipe()
     try:
-        # Mock the multimodal handler's method
-        mock_result = Mock(id="file123", filename="test.txt")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_result)
+        mock_result = Mock(id="file123", filename="test.txt", meta={"name": "test.txt"})
+        get_file_mock = AsyncMock(return_value=mock_result)
+        monkeypatch.setattr(owui_files, "get_file_by_id", get_file_mock)
+        monkeypatch.setattr(owui_files, "infer_file_mime_type", Mock(return_value="text/plain"))
+        monkeypatch.setattr(
+            pipe._file_gateway,
+            "read_file_record_base64",
+            AsyncMock(return_value="QkFTRTY0"),
+        )
 
-        result = await pipe._multimodal_handler._get_file_by_id("file123")
+        result = await pipe._file_gateway.inline_owui_file_id(
+            "file123", chunk_size=1024, max_bytes=1024, user=None
+        )
 
-        assert result is mock_result
-        pipe._multimodal_handler._get_file_by_id.assert_called_once_with("file123")
+        assert result is not None
+        assert result.data_url == "data:text/plain;base64,QkFTRTY0"
+        get_file_mock.assert_awaited_once_with("file123", pipe._file_gateway.logger)
     finally:
         await pipe.close()
 
 
 
 
-def test_infer_file_mime_type_delegates_to_handler():
-    """Test that _infer_file_mime_type delegates to MultimodalHandler."""
-    pipe = Pipe()
-    try:
-        mock_file = Mock(filename="test.jpg")
-        pipe._multimodal_handler._infer_file_mime_type = Mock(return_value="image/jpeg")
+def test_infer_file_mime_type_is_module_func():
+    """infer_file_mime_type is a storage.owui_files module func that normalizes image/jpg."""
+    from open_webui_openrouter_pipe.storage.owui_files import infer_file_mime_type
 
-        result = pipe._multimodal_handler._infer_file_mime_type(mock_file)
+    mock_file = Mock(
+        mime_type="image/jpg",
+        content_type=None,
+        meta={"name": "test.jpg"},
+        spec=["mime_type", "content_type", "meta"],
+    )
 
-        assert result == "image/jpeg"
-    finally:
-        pipe.shutdown()
+    result = infer_file_mime_type(mock_file)
+
+    assert result == "image/jpeg"
 
 
 

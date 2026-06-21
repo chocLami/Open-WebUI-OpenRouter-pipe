@@ -776,6 +776,16 @@ class Valves(BaseModel):
             "Example: 'example.com, example.org:8080, 203.0.113.10'."
         ),
     )
+    ALLOW_UNKNOWN_SIZE_CLOUD_READS: bool = Field(
+        default=False,
+        description=(
+            "Allow reading an OWUI file from a cloud/unknown storage provider when its declared "
+            "meta['size'] is missing or invalid. Default false to avoid an unbounded "
+            "download. When true, the file is still copied to a private temp and capped by "
+            "BASE64_MAX_SIZE_MB after download. Operator recovery path for legacy rows without size "
+            "metadata; not an authorization bypass."
+        ),
+    )
 
     # Models
     MODEL_ID: str = Field(

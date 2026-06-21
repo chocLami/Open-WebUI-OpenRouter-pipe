@@ -36,6 +36,21 @@ If storage cannot be resolved (for example in tests or synthetic contexts), the 
 
 ---
 
+## Reading Open WebUI files (storage gateway)
+
+When the pipe needs to **read** an already-stored Open WebUI file (for example an `/api/v1/files/...` URL to inline as a `data:` URL, or an `input_file.file_id`), every read routes through a single backend-agnostic gateway: `OwuiFileGateway` in `storage/owui_files.py`.
+
+For each read the gateway:
+
+- **Authorizes** the requester against the file (owner, admin, or Open WebUI’s `has_access_to_file`), failing closed if access is denied.
+- **Routes the read through Open WebUI’s `Storage` provider**, so it works on any backend — `local`, `s3`, `gcs`, or `azure` (this fixes [issue #46](https://github.com/rbb-dev/Open-WebUI-OpenRouter-pipe/issues/46), where cloud-backed files were previously unreadable). `FileModel.path` is treated as an opaque storage key; the local provider's read is a no-op (no remote download).
+- **Size-gates** the content against `BASE64_MAX_SIZE_MB`.
+- **Copies every real OWUI file read to a request-owned private temp** (regardless of provider) before any bytes are encoded, then cleans the temp up.
+
+For cloud/unknown backends, a file whose declared `meta['size']` is missing or invalid is **refused by default** to avoid an unbounded download. The global `ALLOW_UNKNOWN_SIZE_CLOUD_READS` Valve opts back in (the download is still capped by `BASE64_MAX_SIZE_MB`); it is a download-safety gate, not an authorization bypass. See [Valves & Configuration Atlas](valves_and_configuration_atlas.md) for its exact default and semantics.
+
+---
+
 ## Images (`image_url` → `input_image`)
 
 ### Inputs accepted

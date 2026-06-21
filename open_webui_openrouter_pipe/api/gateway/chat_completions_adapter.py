@@ -23,6 +23,7 @@ from ...requests.debug import (
 )
 # Imports from core.errors
 from ...core.errors import (
+    RequiredInternalFileError,
     _build_openrouter_api_error,
 )
 from ...core.utils import _apply_retry_after_metadata
@@ -35,8 +36,8 @@ from ..transforms import (
     _responses_payload_to_chat_completions_payload,
 )
 # Imports from storage
-from ...storage.multimodal import (
-    _is_internal_file_url,
+from ...storage.owui_files import (
+    is_internal_file_url,
 )
 from ...storage.persistence import generate_item_id
 from ...models.registry import normalize_model_id_dotted
@@ -60,7 +61,7 @@ class ChatCompletionsAdapter:
         self.logger = logger
 
     @timed
-    async def _inline_internal_chat_files(self, chat_payload: dict, effective_valves: Any) -> None:
+    async def _inline_internal_chat_files(self, chat_payload: dict, effective_valves: Any, *, user: Any = None) -> None:
         """Inline OWUI internal file URLs in chat messages before sending to OpenRouter."""
         messages = chat_payload.get("messages")
         if not isinstance(messages, list) or not messages:
@@ -87,19 +88,24 @@ class ChatCompletionsAdapter:
                 if not isinstance(file_value, str) or not file_value.strip():
                     continue
                 file_value = file_value.strip()
-                if not _is_internal_file_url(file_value):
+                if not is_internal_file_url(file_value):
                     continue
                 try:
-                    inlined = await self._pipe._multimodal_handler._inline_internal_file_url(
-                        file_value, chunk_size=chunk_size, max_bytes=max_bytes,
+                    inlined = await self._pipe._file_gateway.inline_internal_file_url(
+                        file_value, chunk_size=chunk_size, max_bytes=max_bytes, user=user,
                     )
-                except Exception:
-                    self.logger.warning("Exception inlining file URL, skipping: %s", file_value, exc_info=True)
-                    continue
+                except RequiredInternalFileError:
+                    raise
+                except Exception as exc:
+                    raise RequiredInternalFileError(
+                        "A referenced file could not be prepared for the provider.", kind="file",
+                    ) from exc
                 if not inlined:
-                    self.logger.warning("Failed to inline file URL, skipping: %s", file_value)
-                    continue
+                    raise RequiredInternalFileError(
+                        "A referenced file could not be prepared for the provider.", kind="file",
+                    )
                 file_obj["file_data"] = inlined.data_url
+                file_obj.pop("file_url", None)
                 if inlined.filename and "filename" not in file_obj:
                     file_obj["filename"] = inlined.filename
 
@@ -113,11 +119,19 @@ class ChatCompletionsAdapter:
         *,
         valves: "Pipe.Valves | None" = None,
         breaker_key: Optional[str] = None,
+        user: Any = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Send /chat/completions and adapt streaming output into Responses-style events."""
         effective_valves = valves or self._pipe.valves
+        responses_payload = dict(responses_request_body or {})
+        await self._pipe._file_gateway.inline_internal_responses_input_files_inplace(
+            responses_payload,
+            chunk_size=effective_valves.IMAGE_UPLOAD_CHUNK_BYTES,
+            max_bytes=effective_valves.BASE64_MAX_SIZE_MB * 1024 * 1024,
+            user=user,
+        )
         chat_payload = _responses_payload_to_chat_completions_payload(
-            dict(responses_request_body or {}),
+            responses_payload,
         )
         chat_payload = _filter_openrouter_chat_request(chat_payload)
 
@@ -233,7 +247,7 @@ class ChatCompletionsAdapter:
                 if breaker_key and not self._pipe._circuit_breaker.allows(breaker_key):
                     raise RuntimeError("Breaker open for user during stream")
 
-                await self._inline_internal_chat_files(chat_payload, effective_valves)
+                await self._inline_internal_chat_files(chat_payload, effective_valves, user=user)
 
                 timing_mark("chat_http_request_start")
                 async with session.post(url, json=chat_payload, headers=headers) as resp:
@@ -614,11 +628,19 @@ class ChatCompletionsAdapter:
         *,
         valves: "Pipe.Valves | None" = None,
         breaker_key: Optional[str] = None,
+        user: Any = None,
     ) -> dict[str, Any]:
         """Send /chat/completions with stream=false and return the JSON payload."""
         effective_valves = valves or self._pipe.valves
+        responses_payload = dict(responses_request_body or {})
+        await self._pipe._file_gateway.inline_internal_responses_input_files_inplace(
+            responses_payload,
+            chunk_size=effective_valves.IMAGE_UPLOAD_CHUNK_BYTES,
+            max_bytes=effective_valves.BASE64_MAX_SIZE_MB * 1024 * 1024,
+            user=user,
+        )
         chat_payload = _responses_payload_to_chat_completions_payload(
-            dict(responses_request_body or {}),
+            responses_payload,
         )
         chat_payload = _filter_openrouter_chat_request(chat_payload)
 
@@ -650,7 +672,7 @@ class ChatCompletionsAdapter:
                 if breaker_key and not self._pipe._circuit_breaker.allows(breaker_key):
                     raise RuntimeError("Breaker open for user during request")
 
-                await self._inline_internal_chat_files(chat_payload, effective_valves)
+                await self._inline_internal_chat_files(chat_payload, effective_valves, user=user)
 
                 timing_mark("chat_nonstream_http_request_start")
                 async with session.post(url, json=chat_payload, headers=headers) as resp:
@@ -711,6 +733,7 @@ class ChatCompletionsAdapter:
         chunk_queue_warn_size: int = 1000,
         event_queue_maxsize: int = 100,
         event_queue_warn_size: int = 1000,
+        user: Any = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Unified streaming request entrypoint with endpoint routing + fallback."""
         effective_valves = valves or self._pipe.valves
@@ -756,6 +779,7 @@ class ChatCompletionsAdapter:
                 chunk_queue_warn_size=chunk_queue_warn_size,
                 event_queue_maxsize=event_queue_maxsize,
                 event_queue_warn_size=event_queue_warn_size,
+                user=user,
             ):
                 if not responses_emitted_user_visible and not _responses_event_is_user_visible(event):
                     responses_buffer.append(event)
@@ -776,6 +800,7 @@ class ChatCompletionsAdapter:
                 base_url=base_url,
                 valves=effective_valves,
                 breaker_key=breaker_key,
+                user=user,
             ):
                 yield event
 

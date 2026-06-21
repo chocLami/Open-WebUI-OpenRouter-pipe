@@ -98,7 +98,7 @@ class TestDecodeBase64PrefixEdgeCases:
     """Tests for the internal _decode_base64_prefix function edge cases."""
 
     @pytest.mark.asyncio
-    async def test_empty_data_returns_empty_bytes(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_empty_data_returns_empty_bytes(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """Empty input data should return empty bytes (line 147)."""
         orchestrator, pipe = orchestrator_and_pipe
 
@@ -113,8 +113,8 @@ class TestDecodeBase64PrefixEdgeCases:
         }
 
         # Mock file loading to return empty base64
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=Mock(id="audio123"))
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value="")
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=Mock(id="audio123")))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value="")
         pipe._ensure_error_formatter()._emit_templated_error = AsyncMock()
 
         result = await orchestrator.process_request(
@@ -142,7 +142,7 @@ class TestDecodeBase64PrefixEdgeCases:
         pipe._ensure_error_formatter()._emit_templated_error.assert_called()
 
     @pytest.mark.asyncio
-    async def test_invalid_base64_chars_in_prefix(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_invalid_base64_chars_in_prefix(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """Non-base64 characters in prefix should return empty bytes and use declared format (line 160).
 
         When base64 contains invalid characters, the sniff returns empty which falls back to declared format.
@@ -160,9 +160,9 @@ class TestDecodeBase64PrefixEdgeCases:
         }
 
         # Mock file loading to return invalid base64 with special chars
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=Mock(id="audio123"))
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=Mock(id="audio123")))
         # This base64 contains invalid characters like unicode - sniff will return ""
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value="AAAA\u0080BBBB")
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value="AAAA\u0080BBBB")
         pipe._ensure_error_formatter()._emit_templated_error = AsyncMock()
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
@@ -356,7 +356,7 @@ class TestCsvSetNonStringInput:
     """Tests for _csv_set handling of non-string inputs."""
 
     @pytest.mark.asyncio
-    async def test_csv_set_with_non_string_returns_empty_set(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_csv_set_with_non_string_returns_empty_set(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """Non-string input to _csv_set should return empty set (line 213)."""
         orchestrator, pipe = orchestrator_and_pipe
 
@@ -376,8 +376,8 @@ class TestCsvSetNonStringInput:
 
         # Mock file loading
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=valid_b64)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=valid_b64)
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
         pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config = Mock()
@@ -948,7 +948,7 @@ class TestAudioFormatSniffing:
     """Tests for audio format sniffing helper."""
 
     @pytest.mark.asyncio
-    async def test_sniff_wav_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_sniff_wav_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """WAV format should be sniffed from RIFF header."""
         orchestrator, pipe = orchestrator_and_pipe
 
@@ -965,8 +965,8 @@ class TestAudioFormatSniffing:
         }
 
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=valid_b64)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=valid_b64)
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
         pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config = Mock()
@@ -997,7 +997,7 @@ class TestAudioFormatSniffing:
         assert result == "Test response"
 
     @pytest.mark.asyncio
-    async def test_sniff_mp3_id3_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_sniff_mp3_id3_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """MP3 with ID3 header should be sniffed."""
         orchestrator, pipe = orchestrator_and_pipe
 
@@ -1014,8 +1014,8 @@ class TestAudioFormatSniffing:
         }
 
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=valid_b64)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=valid_b64)
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
         pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config = Mock()
@@ -1046,7 +1046,7 @@ class TestAudioFormatSniffing:
         assert result == "Test response"
 
     @pytest.mark.asyncio
-    async def test_sniff_mp3_sync_frame(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_sniff_mp3_sync_frame(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """MP3 sync frame should be sniffed."""
         orchestrator, pipe = orchestrator_and_pipe
 
@@ -1063,8 +1063,8 @@ class TestAudioFormatSniffing:
         }
 
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=valid_b64)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=valid_b64)
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
         pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config = Mock()
@@ -1095,7 +1095,7 @@ class TestAudioFormatSniffing:
         assert result == "Test response"
 
     @pytest.mark.asyncio
-    async def test_sniff_m4a_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_sniff_m4a_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """M4A (ISO BMFF) format should be sniffed from ftyp marker."""
         orchestrator, pipe = orchestrator_and_pipe
 
@@ -1113,8 +1113,8 @@ class TestAudioFormatSniffing:
         }
 
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=valid_b64)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=valid_b64)
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
         pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config = Mock()
@@ -1145,7 +1145,7 @@ class TestAudioFormatSniffing:
         assert result == "Test response"
 
     @pytest.mark.asyncio
-    async def test_sniff_flac_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_sniff_flac_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """FLAC format should be sniffed from fLaC magic bytes."""
         orchestrator, pipe = orchestrator_and_pipe
 
@@ -1163,8 +1163,8 @@ class TestAudioFormatSniffing:
         }
 
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=valid_b64)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=valid_b64)
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
         pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config = Mock()
@@ -1195,7 +1195,7 @@ class TestAudioFormatSniffing:
         assert result == "Test response"
 
     @pytest.mark.asyncio
-    async def test_sniff_ogg_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_sniff_ogg_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """OGG format should be sniffed from OggS magic bytes."""
         orchestrator, pipe = orchestrator_and_pipe
 
@@ -1213,8 +1213,8 @@ class TestAudioFormatSniffing:
         }
 
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=valid_b64)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=valid_b64)
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
         pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config = Mock()
@@ -1245,7 +1245,7 @@ class TestAudioFormatSniffing:
         assert result == "Test response"
 
     @pytest.mark.asyncio
-    async def test_sniff_webm_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_sniff_webm_format(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """WebM format should be sniffed from EBML magic bytes."""
         orchestrator, pipe = orchestrator_and_pipe
 
@@ -1263,8 +1263,8 @@ class TestAudioFormatSniffing:
         }
 
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=valid_b64)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=valid_b64)
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
         pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config = Mock()
@@ -1447,7 +1447,7 @@ class TestDecodeBase64EdgeCases:
     """Additional tests for _decode_base64_prefix edge cases (lines 147, 150-156, 168-169)."""
 
     @pytest.mark.asyncio
-    async def test_empty_base64_data(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_empty_base64_data(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """Empty base64 data should return empty bytes (line 147).
 
         When the base64 data is empty string "", _decode_base64_prefix returns b""
@@ -1465,8 +1465,8 @@ class TestDecodeBase64EdgeCases:
         }
 
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value="")  # Empty
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value="")  # Empty
         pipe._ensure_error_formatter()._emit_templated_error = AsyncMock()
 
         result = await orchestrator.process_request(
@@ -1494,7 +1494,7 @@ class TestDecodeBase64EdgeCases:
         pipe._ensure_error_formatter()._emit_templated_error.assert_called()
 
     @pytest.mark.asyncio
-    async def test_base64_with_corrupted_data_fallback_decode(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_base64_with_corrupted_data_fallback_decode(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """Base64 with slightly corrupted padding triggers fallback decode (lines 165-169).
 
         When validate=True fails, the code tries validate=False.
@@ -1517,8 +1517,8 @@ class TestDecodeBase64EdgeCases:
         valid_b64 = base64.b64encode(test_data).decode()
 
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=valid_b64)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=valid_b64)
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
         pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config = Mock()
@@ -1690,7 +1690,7 @@ class TestAttachmentSkipContinuePaths:
         assert result == "Test response"
 
     @pytest.mark.asyncio
-    async def test_csv_set_with_non_string_value(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body):
+    async def test_csv_set_with_non_string_value(self, orchestrator_and_pipe, mock_valves, mock_session, base_request_body, monkeypatch):
         """Non-string value in _csv_set returns empty set (line 213)."""
         orchestrator, pipe = orchestrator_and_pipe
 
@@ -1708,8 +1708,8 @@ class TestAttachmentSkipContinuePaths:
         }
 
         mock_file = Mock(id="audio123")
-        pipe._multimodal_handler._get_file_by_id = AsyncMock(return_value=mock_file)
-        pipe._multimodal_handler._read_file_record_base64 = AsyncMock(return_value=valid_b64)
+        monkeypatch.setattr("open_webui_openrouter_pipe.requests.orchestrator.get_file_by_id", AsyncMock(return_value=mock_file))
+        pipe._file_gateway.read_file_record_base64 = AsyncMock(return_value=valid_b64)
         pipe._artifact_store._db_fetch = AsyncMock(return_value=None)
         pipe._ensure_reasoning_config_manager()._apply_reasoning_preferences = Mock()
         pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config = Mock()

@@ -33,7 +33,7 @@ else:
     ResponsesBody = Any
 
 # Import error classes
-from ..core.errors import OpenRouterAPIError, StatusMessages
+from ..core.errors import OpenRouterAPIError, RequiredInternalFileError, StatusMessages
 
 # Import costs helper
 from ..core.costs import maybe_dump_costs_snapshot
@@ -545,7 +545,7 @@ class StreamingHandler:
         async def _get_storage_context() -> tuple[Optional[Request], Optional[Any]]:
             nonlocal storage_context_cache
             if storage_context_cache is None:
-                storage_context_cache = await self._pipe._multimodal_handler._resolve_storage_context(request_context, user_obj)
+                storage_context_cache = await self._pipe._file_gateway.resolve_storage_context(request_context, user_obj)
             return storage_context_cache or (None, None)
 
         @timed
@@ -559,7 +559,7 @@ class StreamingHandler:
             if ext == "jpg":
                 ext = "jpeg"
             filename = f"generated-image-{uuid.uuid4().hex}.{ext}"
-            return await self._pipe._multimodal_handler._upload_to_owui_storage(
+            return await self._pipe._file_gateway.upload_to_owui_storage(
                 request=upload_request,
                 user=upload_user,
                 file_data=data,
@@ -600,7 +600,7 @@ class StreamingHandler:
             cleaned = cleaned.strip()
             if not cleaned:
                 return None
-            if not self._pipe._multimodal_handler._validate_base64_size(cleaned):
+            if not self._pipe._file_gateway.validate_base64_size(cleaned):
                 return None
             try:
                 decoded = base64.b64decode(cleaned, validate=True)
@@ -632,7 +632,7 @@ class StreamingHandler:
                     b64_val = entry.get(key)
                     if isinstance(b64_val, str) and b64_val.strip():
                         cleaned = b64_val.strip()
-                        if not self._pipe._multimodal_handler._validate_base64_size(cleaned):
+                        if not self._pipe._file_gateway.validate_base64_size(cleaned):
                             continue
                         try:
                             decoded = base64.b64decode(cleaned, validate=True)
@@ -1089,6 +1089,7 @@ class StreamingHandler:
                         chunk_queue_warn_size=valves.STREAMING_CHUNK_QUEUE_WARN_SIZE,
                         event_queue_maxsize=valves.STREAMING_EVENT_QUEUE_MAXSIZE,
                         event_queue_warn_size=valves.STREAMING_EVENT_QUEUE_WARN_SIZE,
+                        user=user_obj,
                     )
                 else:
                     event_iter = self._pipe.send_openrouter_nonstreaming_request_as_events(
@@ -1099,6 +1100,7 @@ class StreamingHandler:
                         valves=valves,
                         endpoint_override=endpoint_override,
                         breaker_key=user_id or None,
+                        user=user_obj,
                     )
                 timing_mark("event_iteration_start")
                 first_event_logged = False
@@ -2622,6 +2624,18 @@ class StreamingHandler:
                 api_model_id=getattr(body, "api_model", None),
                 usage=total_usage,
             )
+        except RequiredInternalFileError as e:
+            error_occurred = True
+            session_log_reason = str(e)
+            assistant_message = ""
+            cancel_thinking()
+            await self._pipe._ensure_error_formatter()._emit_error(
+                event_emitter,
+                e.user_message,
+                show_error_message=True,
+                done=True,
+            )
+            self.logger.warning("Required internal file unavailable in streaming loop: %s", e.user_message)
         except Exception as e:  # pragma: no cover - network errors
             error_occurred = True
             session_log_reason = str(e)

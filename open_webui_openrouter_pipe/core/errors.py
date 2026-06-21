@@ -95,6 +95,16 @@ class StatusMessages:
     AUDIO_REMOTE_SAVED = "🎵 Downloaded and saved audio from remote URL"
 
 
+class RequiredInternalFileError(Exception):
+    """Raised when a required current-user internal OWUI file cannot be authorised or materialised."""
+
+    def __init__(self, user_message: str, *, kind: str = "file", denied: bool = False) -> None:
+        super().__init__(user_message)
+        self.user_message = user_message
+        self.kind = kind
+        self.denied = denied
+
+
 # -----------------------------------------------------------------------------
 # OpenRouterAPIError Class
 # -----------------------------------------------------------------------------

@@ -75,6 +75,7 @@ except ImportError:
 # Import subsystems
 from .storage.persistence import ArtifactStore
 from .storage.multimodal import MultimodalHandler
+from .storage.owui_files import OwuiFileGateway
 from .streaming.streaming_core import StreamingHandler
 from .streaming.event_emitter import EventEmitterHandler
 
@@ -107,7 +108,7 @@ from .core.config import (
     _select_openrouter_http_referer,
 )
 from .core.utils import _extract_feature_flags, _await_if_needed, _render_error_template, _apply_retry_after_metadata
-from .core.errors import _build_openrouter_api_error, OpenRouterAPIError
+from .core.errors import _build_openrouter_api_error, OpenRouterAPIError, RequiredInternalFileError
 from .models.registry import (
     OpenRouterModelRegistry,
     ModelFamily,
@@ -325,12 +326,14 @@ class Pipe:
         )
 
         # Initialize subsystem handlers synchronously (http_session=None, will be set in async init)
+        self._file_gateway = OwuiFileGateway(logger=self.logger, valves=self.valves)
         self._multimodal_handler: MultimodalHandler = MultimodalHandler(
             logger=self.logger,
             valves=self.valves,
             http_session=None,  # Will be set in _ensure_async_subsystems_initialized
             artifact_store=None,  # Will be set after artifact store initialization
             emit_status_callback=None,
+            file_gateway=self._file_gateway,
         )
         self._streaming_handler: StreamingHandler = StreamingHandler(
             logger=self.logger,
@@ -403,11 +406,6 @@ class Pipe:
 
         # Cleanup tasks
         self._cleanup_task: asyncio.Task | None = None
-
-        # Multimodal state
-        self._storage_user_cache: Optional[Any] = None
-        self._storage_user_lock: Optional[asyncio.Lock] = None
-        self._storage_role_warning_emitted: bool = False
 
         # Session logging (thread-based background archival)
         self._session_log_manager = SessionLogManager(
@@ -2248,6 +2246,16 @@ class Pipe:
             )
             return ""
 
+        except RequiredInternalFileError as e:
+            await self._ensure_error_formatter()._emit_error(
+                __event_emitter__,
+                e.user_message,
+                show_error_message=True,
+                done=True,
+            )
+            self.logger.warning("Required internal file unavailable: %s", e.user_message)
+            return ""
+
         # Generic catch-all
         except Exception as e:
             await self._ensure_error_formatter()._emit_templated_error(
@@ -2345,13 +2353,15 @@ class Pipe:
         chunk_queue_warn_size: int = 1000,
         event_queue_maxsize: int = 100,
         event_queue_warn_size: int = 1000,
+        user: Any = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         async for event in self._ensure_responses_adapter().send_openai_responses_streaming_request(
             session, request_body, api_key, base_url, valves=valves, workers=workers,
             breaker_key=breaker_key, delta_char_limit=delta_char_limit, idle_flush_ms=idle_flush_ms,
             nagle_min_chars=nagle_min_chars,
             chunk_queue_maxsize=chunk_queue_maxsize, chunk_queue_warn_size=chunk_queue_warn_size,
-            event_queue_maxsize=event_queue_maxsize, event_queue_warn_size=event_queue_warn_size
+            event_queue_maxsize=event_queue_maxsize, event_queue_warn_size=event_queue_warn_size,
+            user=user,
         ):
             yield event
 
@@ -2364,9 +2374,11 @@ class Pipe:
         *,
         valves: "Pipe.Valves | None" = None,
         breaker_key: Optional[str] = None,
+        user: Any = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         async for event in self._ensure_chat_completions_adapter().send_openai_chat_completions_streaming_request(
-            session, responses_request_body, api_key, base_url, valves=valves, breaker_key=breaker_key
+            session, responses_request_body, api_key, base_url, valves=valves, breaker_key=breaker_key,
+            user=user,
         ):
             yield event
 
@@ -2379,9 +2391,11 @@ class Pipe:
         *,
         valves: "Pipe.Valves | None" = None,
         breaker_key: Optional[str] = None,
+        user: Any = None,
     ) -> dict[str, Any]:
         return await self._ensure_chat_completions_adapter().send_openai_chat_completions_nonstreaming_request(
-            session, responses_request_body, api_key, base_url, valves=valves, breaker_key=breaker_key
+            session, responses_request_body, api_key, base_url, valves=valves, breaker_key=breaker_key,
+            user=user,
         )
 
     async def send_openrouter_nonstreaming_request_as_events(
@@ -2394,6 +2408,7 @@ class Pipe:
         valves: "Pipe.Valves | None" = None,
         endpoint_override: Literal["responses", "chat_completions"] | None = None,
         breaker_key: Optional[str] = None,
+        user: Any = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         async for event in self._ensure_nonstreaming_adapter().send_openrouter_nonstreaming_request_as_events(
             session,
@@ -2403,6 +2418,7 @@ class Pipe:
             valves=valves,
             endpoint_override=endpoint_override,
             breaker_key=breaker_key,
+            user=user,
         ):
             yield event
 
@@ -2424,6 +2440,7 @@ class Pipe:
         chunk_queue_warn_size: int = 1000,
         event_queue_maxsize: int = 100,
         event_queue_warn_size: int = 1000,
+        user: Any = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         async for event in self._ensure_chat_completions_adapter().send_openrouter_streaming_request(
             session, responses_request_body, api_key, base_url, valves=valves,
@@ -2431,7 +2448,8 @@ class Pipe:
             delta_char_limit=delta_char_limit, idle_flush_ms=idle_flush_ms,
             nagle_min_chars=nagle_min_chars,
             chunk_queue_maxsize=chunk_queue_maxsize, chunk_queue_warn_size=chunk_queue_warn_size,
-            event_queue_maxsize=event_queue_maxsize, event_queue_warn_size=event_queue_warn_size
+            event_queue_maxsize=event_queue_maxsize, event_queue_warn_size=event_queue_warn_size,
+            user=user,
         ):
             yield event
 
@@ -2721,9 +2739,11 @@ class Pipe:
         *,
         valves: "Pipe.Valves | None" = None,
         breaker_key: Optional[str] = None,
+        user: Any = None,
     ) -> dict[str, Any]:
         return await self._ensure_responses_adapter().send_openai_responses_nonstreaming_request(
-            session, request_body, api_key, base_url, valves=valves, breaker_key=breaker_key
+            session, request_body, api_key, base_url, valves=valves, breaker_key=breaker_key,
+            user=user,
         )
 
     # ADDITIONAL HELPER METHODS (called by orchestration methods)

@@ -23,7 +23,7 @@ from aioresponses import aioresponses
 from open_webui_openrouter_pipe import Pipe
 from open_webui_openrouter_pipe.api.gateway.chat_completions_adapter import ChatCompletionsAdapter
 from open_webui_openrouter_pipe.requests.transformer import transform_messages_to_input
-from open_webui_openrouter_pipe.storage.multimodal import InlinedFile
+from open_webui_openrouter_pipe.storage.owui_files import InlinedFile
 
 
 def _sse(obj: dict[str, Any]) -> str:
@@ -3998,11 +3998,11 @@ async def test_chat_completions_inlines_internal_file_urls(monkeypatch) -> None:
     pipe = Pipe()
     valves = pipe.valves.model_copy(update={"DEFAULT_LLM_ENDPOINT": "chat_completions"})
 
-    async def fake_inline(url: str, *, chunk_size: int, max_bytes: int) -> InlinedFile | None:
-        assert url == "/api/v1/files/abc123"
+    async def fake_inline_id(file_id: str, *, chunk_size: int, max_bytes: int, user=None) -> InlinedFile | None:
+        assert file_id == "abc123"
         return InlinedFile(data_url="data:application/pdf;base64,QUJD", filename="doc.pdf")
 
-    monkeypatch.setattr(pipe._multimodal_handler, "_inline_internal_file_url", fake_inline)
+    monkeypatch.setattr(pipe._file_gateway, "inline_owui_file_id", fake_inline_id)
 
     # Mock HTTP at boundary
     with aioresponses() as mock_http:
@@ -4038,6 +4038,35 @@ async def test_chat_completions_inlines_internal_file_urls(monkeypatch) -> None:
                 pass
 
     await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_inline_internal_chat_files_removes_file_url_after_inline(monkeypatch) -> None:
+    """A successful chat-file inline replaces file_url with file_data AND removes the internal URL (no leak)."""
+    pipe = Pipe()
+    try:
+        async def fake_inline(url, *, chunk_size, max_bytes, user=None):
+            assert url == "/api/v1/files/abc/content"
+            return InlinedFile(data_url="data:application/pdf;base64,QUJD", filename="doc.pdf")
+
+        monkeypatch.setattr(pipe._file_gateway, "inline_internal_file_url", fake_inline)
+        adapter = pipe._ensure_chat_completions_adapter()
+        chat_payload = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "file", "file": {"file_url": "/api/v1/files/abc/content"}},
+                    ],
+                }
+            ]
+        }
+        await adapter._inline_internal_chat_files(chat_payload, pipe.valves, user=None)
+        file_obj = chat_payload["messages"][0]["content"][0]["file"]
+        assert file_obj["file_data"] == "data:application/pdf;base64,QUJD"
+        assert "file_url" not in file_obj
+    finally:
+        await pipe.close()
 
 
 @pytest.mark.asyncio
@@ -4358,11 +4387,11 @@ async def test_chat_completions_nonstreaming_inlines_internal_file_urls(monkeypa
     pipe = Pipe()
     valves = pipe.valves.model_copy(update={"DEFAULT_LLM_ENDPOINT": "chat_completions"})
 
-    async def fake_inline(url: str, *, chunk_size: int, max_bytes: int) -> InlinedFile | None:
-        assert url == "/api/v1/files/abc123"
+    async def fake_inline_id(file_id: str, *, chunk_size: int, max_bytes: int, user=None) -> InlinedFile | None:
+        assert file_id == "abc123"
         return InlinedFile(data_url="data:application/pdf;base64,QUJD", filename="doc.pdf")
 
-    monkeypatch.setattr(pipe._multimodal_handler, "_inline_internal_file_url", fake_inline)
+    monkeypatch.setattr(pipe._file_gateway, "inline_owui_file_id", fake_inline_id)
 
     # Mock HTTP at boundary
     with aioresponses() as mock_http:
@@ -4394,6 +4423,195 @@ async def test_chat_completions_nonstreaming_inlines_internal_file_urls(monkeypa
                 valves=valves,
                 breaker_key=None,
             )
+
+    await pipe.close()
+
+
+# ============================================================================
+# input_file.file_id pre-inline + denied-file hard-fail (issue #46)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_input_file_file_id_preinlined_to_file_data(monkeypatch) -> None:
+    """A responses input_file carrying an internal OWUI file_id is inlined to
+    file_data BEFORE the responses->chat conversion drops file_id.
+
+    The outbound /chat/completions body must contain the file_data data URL and
+    must NOT contain a dropped file_id or an internal /api/v1/files/ URL."""
+    pipe = Pipe()
+    valves = pipe.valves.model_copy(update={"DEFAULT_LLM_ENDPOINT": "chat_completions"})
+
+    async def fake_inline_id(file_id: str, *, chunk_size: int, max_bytes: int, user=None) -> InlinedFile | None:
+        assert file_id == "abc123"
+        return InlinedFile(data_url="data:application/pdf;base64,QUJD", filename="doc.pdf")
+
+    monkeypatch.setattr(pipe._file_gateway, "inline_owui_file_id", fake_inline_id)
+
+    captured: dict[str, Any] = {}
+
+    def capture_request(url, **kwargs):
+        if "json" in kwargs:
+            captured["body"] = kwargs["json"]
+
+    with aioresponses() as mock_http:
+        mock_http.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            body=b"data: [DONE]\n\n",
+            headers={"Content-Type": "text/event-stream"},
+            status=200,
+            callback=capture_request,
+        )
+
+        async with aiohttp.ClientSession() as session:
+            async for _event in pipe.send_openai_chat_completions_streaming_request(
+                session,
+                {
+                    "model": "anthropic/claude-sonnet-4.5",
+                    "stream": True,
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "read this"},
+                                {"type": "input_file", "filename": "doc.pdf", "file_id": "abc123"},
+                            ],
+                        }
+                    ],
+                },
+                api_key="test",
+                base_url="https://openrouter.ai/api/v1",
+                valves=valves,
+                breaker_key=None,
+            ):
+                pass
+
+    assert "body" in captured, "Expected the outbound chat-completions body to be captured"
+    serialized = json.dumps(captured["body"])
+    assert "data:application/pdf;base64,QUJD" in serialized, "file_data data URL must reach the provider"
+    assert "/api/v1/files/" not in serialized, "internal OWUI file URL must never be sent to the provider"
+    assert '"file_id"' not in serialized, "file_id must be inlined and dropped, not forwarded"
+
+    await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_denied_internal_file_aborts_before_http(monkeypatch) -> None:
+    """When the gateway inline raises RequiredInternalFileError (denied), the
+    streaming send aborts BEFORE any session.post; no provider request is made
+    and the internal URL is never sent."""
+    from open_webui_openrouter_pipe.core.errors import RequiredInternalFileError
+
+    pipe = Pipe()
+    valves = pipe.valves.model_copy(update={"DEFAULT_LLM_ENDPOINT": "chat_completions"})
+
+    async def deny(file_id: str, *, chunk_size: int, max_bytes: int, user=None):
+        raise RequiredInternalFileError("denied", kind="file", denied=True)
+
+    monkeypatch.setattr(pipe._file_gateway, "inline_owui_file_id", deny)
+
+    http_calls = {"count": 0}
+
+    def capture_request(url, **kwargs):
+        http_calls["count"] += 1
+
+    with aioresponses() as mock_http:
+        mock_http.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            body=b"data: [DONE]\n\n",
+            headers={"Content-Type": "text/event-stream"},
+            status=200,
+            callback=capture_request,
+            repeat=True,
+        )
+
+        raised: RequiredInternalFileError | None = None
+        async with aiohttp.ClientSession() as session:
+            try:
+                async for _event in pipe.send_openai_chat_completions_streaming_request(
+                    session,
+                    {
+                        "model": "anthropic/claude-sonnet-4.5",
+                        "stream": True,
+                        "input": [
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": [
+                                    {"type": "input_file", "filename": "doc.pdf", "file_id": "abc123"},
+                                ],
+                            }
+                        ],
+                    },
+                    api_key="test",
+                    base_url="https://openrouter.ai/api/v1",
+                    valves=valves,
+                    breaker_key=None,
+                    user={"id": "u1"},
+                ):
+                    pass
+            except RequiredInternalFileError as exc:
+                raised = exc
+
+    assert raised is not None, "Denied internal file must raise RequiredInternalFileError"
+    assert raised.denied is True
+    assert http_calls["count"] == 0, "No provider request may be made when an internal file is denied"
+
+    await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_preinline_threads_user(monkeypatch) -> None:
+    """The responses input_file pre-inline must be invoked with the request user
+    threaded through (not None) on the primary send path."""
+    pipe = Pipe()
+    valves = pipe.valves.model_copy(update={"DEFAULT_LLM_ENDPOINT": "chat_completions"})
+
+    seen_user: dict[str, Any] = {}
+
+    async def fake_inline_id(file_id: str, *, chunk_size: int, max_bytes: int, user=None) -> InlinedFile | None:
+        seen_user["user"] = user
+        return InlinedFile(data_url="data:application/pdf;base64,QUJD", filename="doc.pdf")
+
+    monkeypatch.setattr(pipe._file_gateway, "inline_owui_file_id", fake_inline_id)
+
+    request_user = {"id": "u1", "role": "user"}
+
+    with aioresponses() as mock_http:
+        mock_http.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            body=b"data: [DONE]\n\n",
+            headers={"Content-Type": "text/event-stream"},
+            status=200,
+        )
+
+        async with aiohttp.ClientSession() as session:
+            async for _event in pipe.send_openai_chat_completions_streaming_request(
+                session,
+                {
+                    "model": "anthropic/claude-sonnet-4.5",
+                    "stream": True,
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_file", "filename": "doc.pdf", "file_id": "abc123"},
+                            ],
+                        }
+                    ],
+                },
+                api_key="test",
+                base_url="https://openrouter.ai/api/v1",
+                valves=valves,
+                breaker_key=None,
+                user=request_user,
+            ):
+                pass
+
+    assert "user" in seen_user, "Pre-inline must be invoked"
+    assert seen_user["user"] is request_user, "Pre-inline must receive the threaded request user, not None"
 
     await pipe.close()
 

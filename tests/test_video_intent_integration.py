@@ -258,9 +258,9 @@ class TestMaterialiseFramePlan:
     def _make_adapter_with_mocks(self):
         from open_webui_openrouter_pipe.integrations.video import VideoGenerationAdapter
         pipe = MagicMock()
-        pipe._multimodal_handler = MagicMock()
-        pipe._multimodal_handler._get_file_by_id = AsyncMock()
-        pipe._multimodal_handler._upload_to_owui_storage = AsyncMock(return_value="uploaded_id")
+        pipe.valves.VIDEO_MAX_SIZE_MB = 500
+        pipe.valves.ALLOW_UNKNOWN_SIZE_CLOUD_READS = False
+        pipe._file_gateway.upload_to_owui_storage = AsyncMock(return_value="uploaded_id")
         adapter = VideoGenerationAdapter(pipe=pipe, logger=logging.getLogger("test"))
         return adapter, pipe
 
@@ -353,6 +353,44 @@ class TestMaterialiseFramePlan:
                     request=None, user_obj=SimpleNamespace(id="u1"),
                     chat_id="c1", message_id="m1",
                 )
+
+    @pytest.mark.asyncio
+    async def test_resolve_returning_none_adds_download_failed_downgrade(self):
+        """When `_resolve_owui_file_path` degrades to None (e.g. the gateway
+        raised RequiredInternalFileError for an unauthorized prior video), the
+        caller drops the entry and records a downgrade — no crash."""
+        adapter, _ = self._make_adapter_with_mocks()
+        intent = self._make_intent_with_prior_video()
+        with patch.object(adapter, "_resolve_owui_file_path", AsyncMock(return_value=None)):
+            video_meta: dict = {}
+            await adapter._materialise_frame_plan(
+                intent=intent, video_meta=video_meta,
+                request=None, user_obj=SimpleNamespace(id="u_unauthorized"),
+                chat_id="c1", message_id="m1",
+            )
+        assert "frame_images" not in video_meta or video_meta.get("frame_images") == []
+        assert any("prior_video_download_failed" in d for d in intent.downgrades)
+
+    @pytest.mark.asyncio
+    async def test_resolved_temp_is_unlinked_after_extraction(self, tmp_path):
+        """The private temp returned by `_resolve_owui_file_path` must be
+        unlinked by `_materialise_frame_plan` once the frame is extracted —
+        covers the per-prior-video temp leak fix."""
+        adapter, _ = self._make_adapter_with_mocks()
+        intent = self._make_intent_with_prior_video()
+        real_temp = tmp_path / "orpipe-read-prior.mp4"
+        real_temp.write_bytes(b"fake_video")
+        assert real_temp.exists()
+        with patch.object(adapter, "_resolve_owui_file_path", AsyncMock(return_value=real_temp)), \
+             patch("open_webui_openrouter_pipe.integrations.video.extract_frame", AsyncMock(return_value=SimpleNamespace(
+                 image_bytes=b"fake_png", width=10, height=10, downgrade_note="",
+             ))):
+            await adapter._materialise_frame_plan(
+                intent=intent, video_meta={},
+                request=None, user_obj=SimpleNamespace(id="u1"),
+                chat_id="c1", message_id="m1",
+            )
+        assert not real_temp.exists(), "prior-video temp leaked; _materialise_frame_plan must unlink it"
 
 
 # -----------------------------------------------------------------------------

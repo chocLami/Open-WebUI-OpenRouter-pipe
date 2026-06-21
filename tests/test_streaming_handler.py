@@ -33,7 +33,7 @@ import pytest
 
 from open_webui_openrouter_pipe import Pipe, ResponsesBody, _ToolExecutionContext
 from open_webui_openrouter_pipe.core.config import EncryptedStr
-from open_webui_openrouter_pipe.core.errors import OpenRouterAPIError
+from open_webui_openrouter_pipe.core.errors import OpenRouterAPIError, RequiredInternalFileError
 from open_webui_openrouter_pipe.streaming.streaming_core import (
     StreamingHandler,
     _wrap_event_emitter,
@@ -4738,10 +4738,10 @@ class TestValidateBase64Size:
         pipe = pipe_instance
 
         small_b64 = base64.b64encode(b"small").decode()
-        assert pipe._multimodal_handler._validate_base64_size(small_b64) is True
+        assert pipe._file_gateway.validate_base64_size(small_b64) is True
 
         large_b64 = base64.b64encode(b"x" * 1000).decode()
-        result = pipe._multimodal_handler._validate_base64_size(large_b64)
+        result = pipe._file_gateway.validate_base64_size(large_b64)
         assert isinstance(result, bool)
 
 
@@ -6258,8 +6258,8 @@ class TestStreamingCoreAdditionalCoverage:
         def mock_parse_data_url(data_str):
             return {"data": b"test", "mime_type": "image/png"}
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_resolve_storage_context", mock_resolve_storage_context)
-        monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage", mock_upload_to_storage)
+        monkeypatch.setattr(pipe._file_gateway, "resolve_storage_context", mock_resolve_storage_context)
+        monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage", mock_upload_to_storage)
         monkeypatch.setattr(pipe._multimodal_handler, "_parse_data_url", mock_parse_data_url)
 
         data_url = f"data:image/png;base64,{sample_image_base64}"
@@ -6379,8 +6379,8 @@ class TestStreamingCoreAdditionalCoverage:
         async def mock_upload_to_storage(*args, **kwargs):
             return "stored-file-jpg"
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_resolve_storage_context", mock_resolve_storage_context)
-        monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage", mock_upload_to_storage)
+        monkeypatch.setattr(pipe._file_gateway, "resolve_storage_context", mock_resolve_storage_context)
+        monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage", mock_upload_to_storage)
 
         events = [
             {
@@ -7325,7 +7325,7 @@ class TestStreamingCoreAdditionalCoverage:
             return False
 
         # Monkeypatch on multimodal_handler using setattr
-        pipe._multimodal_handler._validate_base64_size = mock_validate_size
+        pipe._file_gateway.validate_base64_size = mock_validate_size
 
         events = [
             {
@@ -8307,8 +8307,8 @@ class TestImagePersistenceWithStatusMessages:
         async def _mock_upload(self, request, user, file_data, filename, mime_type, **kwargs):
             return "fake-file-id-1234"
 
-        monkeypatch.setattr(type(pipe._multimodal_handler), "_resolve_storage_context", _mock_resolve_storage)
-        monkeypatch.setattr(type(pipe._multimodal_handler), "_upload_to_owui_storage", _mock_upload)
+        monkeypatch.setattr(type(pipe._file_gateway), "resolve_storage_context", _mock_resolve_storage)
+        monkeypatch.setattr(type(pipe._file_gateway), "upload_to_owui_storage", _mock_upload)
 
         emitted: list[dict] = []
         async def emitter(event):
@@ -9565,8 +9565,8 @@ class TestImagePersistenceExtConversion:
             uploaded_files.append({"filename": filename, "mime_type": mime_type})
             return "file-123"
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_resolve_storage_context", mock_resolve_storage_context)
-        monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage", mock_upload)
+        monkeypatch.setattr(pipe._file_gateway, "resolve_storage_context", mock_resolve_storage_context)
+        monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage", mock_upload)
 
         emitted: list[dict] = []
         async def emitter(event):
@@ -9687,7 +9687,7 @@ class TestMaterializeImageFromStr:
         async def mock_resolve_storage_context(request_context, user_obj):
             return (None, None)
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_resolve_storage_context", mock_resolve_storage_context)
+        monkeypatch.setattr(pipe._file_gateway, "resolve_storage_context", mock_resolve_storage_context)
 
         result = await pipe._streaming_handler._run_streaming_loop(
             body,
@@ -9771,7 +9771,7 @@ class TestMaterializeImageEntry:
         async def mock_resolve_storage_context(request_context, user_obj):
             return (None, None)
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_resolve_storage_context", mock_resolve_storage_context)
+        monkeypatch.setattr(pipe._file_gateway, "resolve_storage_context", mock_resolve_storage_context)
 
         result = await pipe._streaming_handler._run_streaming_loop(
             body,
@@ -10485,8 +10485,8 @@ class TestDataUrlImagePersistence:
         async def mock_emit_status(emitter, msg, done=False):
             status_calls.append((msg, done))
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_resolve_storage_context", mock_resolve_storage_context)
-        monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage", mock_upload)
+        monkeypatch.setattr(pipe._file_gateway, "resolve_storage_context", mock_resolve_storage_context)
+        monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage", mock_upload)
         monkeypatch.setattr(pipe._event_emitter_handler, "_emit_status", mock_emit_status)
 
         emitted: list[dict] = []
@@ -10544,8 +10544,8 @@ class TestImagePersistenceFailFallback:
         async def mock_upload_fail(request, user, file_data, filename, mime_type, **kwargs):
             return None  # Upload fails
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_resolve_storage_context", mock_resolve_storage_context)
-        monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage", mock_upload_fail)
+        monkeypatch.setattr(pipe._file_gateway, "resolve_storage_context", mock_resolve_storage_context)
+        monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage", mock_upload_fail)
 
         result = await pipe._streaming_handler._run_streaming_loop(
             body,
@@ -10610,8 +10610,8 @@ class TestImageB64JsonPersistence:
         async def mock_emit_status(emitter, msg, done=False):
             pass
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_resolve_storage_context", mock_resolve_storage_context)
-        monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage", mock_upload)
+        monkeypatch.setattr(pipe._file_gateway, "resolve_storage_context", mock_resolve_storage_context)
+        monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage", mock_upload)
         monkeypatch.setattr(pipe._event_emitter_handler, "_emit_status", mock_emit_status)
 
         result = await pipe._streaming_handler._run_streaming_loop(
@@ -10669,8 +10669,8 @@ class TestRawBase64Persistence:
         async def mock_emit_status(emitter, msg, done=False):
             pass
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_resolve_storage_context", mock_resolve_storage_context)
-        monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage", mock_upload)
+        monkeypatch.setattr(pipe._file_gateway, "resolve_storage_context", mock_resolve_storage_context)
+        monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage", mock_upload)
         monkeypatch.setattr(pipe._event_emitter_handler, "_emit_status", mock_emit_status)
 
         result = await pipe._streaming_handler._run_streaming_loop(
@@ -10717,7 +10717,7 @@ class TestValidateBase64SizeFails:
         def mock_validate(b64_str):
             return False  # Size validation fails
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_validate_base64_size", mock_validate)
+        monkeypatch.setattr(pipe._file_gateway, "validate_base64_size", mock_validate)
 
         result = await pipe._streaming_handler._run_streaming_loop(
             body,
@@ -10731,6 +10731,72 @@ class TestValidateBase64SizeFails:
 
         # Should just return "Done" without image
         assert result == "Done"
+
+
+class TestRequiredInternalFileErrorStreaming:
+    """The streaming loop must catch RequiredInternalFileError from adapter
+    inlining and surface it as a visible error, not a generic INTERNAL_ERROR."""
+
+    @pytest.mark.asyncio
+    async def test_streaming_typed_catch_emits_visible_error_not_internal(
+        self, monkeypatch, pipe_instance_async
+    ):
+        """When the event iterator raises RequiredInternalFileError (as the
+        chat/responses adapter does when a required internal file cannot be
+        inlined), the loop's typed handler emits user_message via _emit_error
+        with show_error_message=True and never falls through to the broad
+        INTERNAL_ERROR template path."""
+        pipe = pipe_instance_async
+        body = ResponsesBody(model="test/model", input=[], stream=True)
+
+        denial_message = "A referenced file could not be prepared for the provider."
+
+        async def raising_stream(self, session, request_body, **_kwargs):
+            """Stand in for the adapter inline call failing before any event."""
+            if False:
+                yield {}
+            raise RequiredInternalFileError(denial_message, kind="file")
+
+        emit_error_calls: list[dict[str, Any]] = []
+        templated_error_calls: list[str] = []
+
+        async def spy_emit_error(event_emitter, error_obj, **kwargs):
+            emit_error_calls.append({"error_obj": error_obj, "kwargs": kwargs})
+
+        async def spy_emit_templated_error(*_args, **kwargs):
+            templated_error_calls.append(str(kwargs.get("log_message", "templated")))
+
+        monkeypatch.setattr(Pipe, "send_openrouter_streaming_request", raising_stream)
+        monkeypatch.setattr(pipe._ensure_error_formatter(), "_emit_error", spy_emit_error)
+        monkeypatch.setattr(
+            pipe._ensure_error_formatter(), "_emit_templated_error", spy_emit_templated_error
+        )
+
+        emitted: list[dict] = []
+        async def emitter(event):
+            emitted.append(event)
+
+        result = await pipe._streaming_handler._run_streaming_loop(
+            body,
+            pipe.valves,
+            emitter,
+            metadata={"model": {"id": "test"}},
+            tools={},
+            session=cast(Any, object()),
+            user_id="user-123",
+        )
+
+        assert len(emit_error_calls) == 1, (
+            f"expected exactly one _emit_error call, got {len(emit_error_calls)}"
+        )
+        call = emit_error_calls[0]
+        assert call["error_obj"] == denial_message
+        assert call["kwargs"].get("show_error_message") is True
+        assert call["kwargs"].get("done") is True
+        assert not templated_error_calls, (
+            f"typed error degraded to generic INTERNAL_ERROR path: {templated_error_calls}"
+        )
+        assert result == ""
 
 
 class TestAppendOutputBlockEmptySnippet:
@@ -11095,8 +11161,8 @@ class TestJpgMimeTypeConversion:
         async def mock_emit_status(emitter, msg, done=False):
             pass
 
-        monkeypatch.setattr(pipe._multimodal_handler, "_resolve_storage_context", mock_resolve_storage_context)
-        monkeypatch.setattr(pipe._multimodal_handler, "_upload_to_owui_storage", mock_upload)
+        monkeypatch.setattr(pipe._file_gateway, "resolve_storage_context", mock_resolve_storage_context)
+        monkeypatch.setattr(pipe._file_gateway, "upload_to_owui_storage", mock_upload)
         monkeypatch.setattr(pipe._event_emitter_handler, "_emit_status", mock_emit_status)
 
         result = await pipe._streaming_handler._run_streaming_loop(

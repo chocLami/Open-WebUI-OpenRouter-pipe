@@ -23,12 +23,15 @@ import pytest_asyncio
 from open_webui_openrouter_pipe import Pipe
 from open_webui_openrouter_pipe.requests.transformer import transform_messages_to_input
 from open_webui_openrouter_pipe.storage.multimodal import (
-    InlinedFile,
-    _extract_internal_file_id,
     _extract_openrouter_og_image,
     _guess_image_mime_type,
-    _is_internal_file_url,
 )
+from open_webui_openrouter_pipe.storage.owui_files import (
+    InlinedFile,
+    extract_internal_file_id as _extract_internal_file_id,
+    is_internal_file_url as _is_internal_file_url,
+)
+from open_webui_openrouter_pipe.storage import owui_files as owui_files_module
 
 
 # ---------------------------------------------------------------------------
@@ -340,12 +343,14 @@ class TestIsInternalFileUrl:
     """Tests for internal file URL detection."""
 
     def test_detects_api_v1_files_url(self):
-        """Should detect /api/v1/files/ URLs."""
-        assert _is_internal_file_url("http://localhost/api/v1/files/abc123")
+        """Detect relative /api/v1/files/ URLs; absolute URLs are external (host-unaware false positives)."""
+        assert _is_internal_file_url("/api/v1/files/abc123") is True
+        assert _is_internal_file_url("http://localhost/api/v1/files/abc123") is False
 
-    def test_detects_files_url(self):
-        """Should detect /files/ URLs."""
-        assert _is_internal_file_url("http://localhost/files/abc123")
+    def test_bare_files_url_not_internal(self):
+        """Bare /files/ URLs (no /api/v1/) are not OWUI-internal; OWUI serves files only at /api/v1/files/."""
+        assert _is_internal_file_url("http://localhost/files/abc123") is False
+        assert _is_internal_file_url("https://cdn.example.com/files/doc") is False
 
     def test_returns_false_for_non_string(self):
         """Should return False for non-string input."""
@@ -368,31 +373,35 @@ class TestGetFileById:
     @pytest.mark.asyncio
     async def test_returns_none_when_files_is_none(self, pipe_instance_async):
         """Should return None when Files module is unavailable."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
+        import open_webui_openrouter_pipe.storage.owui_files as owui_files_module
 
-        original_files = multimodal_module.Files
+        original_files = owui_files_module.Files
         try:
-            multimodal_module.Files = None
-            result = await pipe_instance_async._multimodal_handler._get_file_by_id("test-file-id")
+            owui_files_module.Files = None
+            result = await owui_files_module.get_file_by_id(
+                "test-file-id", pipe_instance_async.logger
+            )
             assert result is None
         finally:
-            multimodal_module.Files = original_files
+            owui_files_module.Files = original_files
 
     @pytest.mark.asyncio
     async def test_returns_none_on_exception(self, pipe_instance_async):
         """Should return None and log error on exception."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
+        import open_webui_openrouter_pipe.storage.owui_files as owui_files_module
 
         mock_files = Mock()
         mock_files.get_file_by_id = Mock(side_effect=RuntimeError("DB error"))
 
-        original_files = multimodal_module.Files
+        original_files = owui_files_module.Files
         try:
-            multimodal_module.Files = mock_files
-            result = await pipe_instance_async._multimodal_handler._get_file_by_id("test-file-id")
+            owui_files_module.Files = mock_files
+            result = await owui_files_module.get_file_by_id(
+                "test-file-id", pipe_instance_async.logger
+            )
             assert result is None
         finally:
-            multimodal_module.Files = original_files
+            owui_files_module.Files = original_files
 
 
 # ---------------------------------------------------------------------------
@@ -406,25 +415,25 @@ class TestInferFileMimeType:
     def test_normalizes_image_jpg_to_jpeg(self, pipe_instance):
         """Should normalize image/jpg to image/jpeg."""
         file_obj = SimpleNamespace(mime_type="image/jpg")
-        result = pipe_instance._multimodal_handler._infer_file_mime_type(file_obj)
+        result = owui_files_module.infer_file_mime_type(file_obj)
         assert result == "image/jpeg"
 
     def test_returns_application_octet_stream_as_default(self, pipe_instance):
         """Should return application/octet-stream when no MIME type found."""
         file_obj = SimpleNamespace()
-        result = pipe_instance._multimodal_handler._infer_file_mime_type(file_obj)
+        result = owui_files_module.infer_file_mime_type(file_obj)
         assert result == "application/octet-stream"
 
     def test_uses_meta_dict_content_type(self, pipe_instance):
         """Should extract content_type from meta dict."""
         file_obj = SimpleNamespace(meta={"content_type": "application/pdf"})
-        result = pipe_instance._multimodal_handler._infer_file_mime_type(file_obj)
+        result = owui_files_module.infer_file_mime_type(file_obj)
         assert result == "application/pdf"
 
     def test_uses_meta_dict_mimeType(self, pipe_instance):
         """Should extract mimeType from meta dict."""
         file_obj = SimpleNamespace(meta={"mimeType": "text/plain"})
-        result = pipe_instance._multimodal_handler._infer_file_mime_type(file_obj)
+        result = owui_files_module.infer_file_mime_type(file_obj)
         assert result == "text/plain"
 
     def test_prefers_direct_mime_type_attribute(self, pipe_instance):
@@ -433,7 +442,7 @@ class TestInferFileMimeType:
             mime_type="image/png",
             meta={"content_type": "image/jpeg"},
         )
-        result = pipe_instance._multimodal_handler._infer_file_mime_type(file_obj)
+        result = owui_files_module.infer_file_mime_type(file_obj)
         assert result == "image/png"
 
 
@@ -450,7 +459,7 @@ class TestReadFileRecordBase64:
         """Should raise ValueError when max_bytes is zero."""
         file_obj = SimpleNamespace()
         with pytest.raises(ValueError, match="BASE64_MAX_SIZE_MB must be greater than zero"):
-            await pipe_instance_async._multimodal_handler._read_file_record_base64(
+            await pipe_instance_async._file_gateway.read_file_record_base64(
                 file_obj, chunk_size=1024, max_bytes=0
             )
 
@@ -459,7 +468,7 @@ class TestReadFileRecordBase64:
         """Should read b64 from data dict."""
         b64_content = base64.b64encode(b"test content").decode("ascii")
         file_obj = SimpleNamespace(data={"b64": b64_content})
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result == b64_content
@@ -469,7 +478,7 @@ class TestReadFileRecordBase64:
         """Should read base64 key from data dict."""
         b64_content = base64.b64encode(b"test content").decode("ascii")
         file_obj = SimpleNamespace(data={"base64": b64_content})
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result == b64_content
@@ -479,7 +488,7 @@ class TestReadFileRecordBase64:
         """Should read data key from data dict."""
         b64_content = base64.b64encode(b"test content").decode("ascii")
         file_obj = SimpleNamespace(data={"data": b64_content})
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result == b64_content
@@ -489,7 +498,7 @@ class TestReadFileRecordBase64:
         """Should read bytes from data dict and encode."""
         raw_bytes = b"raw byte content"
         file_obj = SimpleNamespace(data={"bytes": raw_bytes})
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result == base64.b64encode(raw_bytes).decode("ascii")
@@ -499,7 +508,7 @@ class TestReadFileRecordBase64:
         """Should read bytearray from data dict and encode."""
         raw_bytes = bytearray(b"raw byte content")
         file_obj = SimpleNamespace(data={"bytes": raw_bytes})
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result == base64.b64encode(bytes(raw_bytes)).decode("ascii")
@@ -512,7 +521,7 @@ class TestReadFileRecordBase64:
         file_obj = SimpleNamespace(data={"b64": large_b64})
 
         with pytest.raises(ValueError, match="Stored base64 payload exceeds configured limit"):
-            await pipe_instance_async._multimodal_handler._read_file_record_base64(
+            await pipe_instance_async._file_gateway.read_file_record_base64(
                 file_obj, chunk_size=1024, max_bytes=1024 * 1024
             )
 
@@ -524,7 +533,7 @@ class TestReadFileRecordBase64:
         test_file.write_bytes(test_content)
 
         file_obj = SimpleNamespace(path=str(test_file))
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result == base64.b64encode(test_content).decode("ascii")
@@ -537,7 +546,7 @@ class TestReadFileRecordBase64:
         test_file.write_bytes(test_content)
 
         file_obj = SimpleNamespace(file_path=str(test_file))
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result == base64.b64encode(test_content).decode("ascii")
@@ -547,7 +556,7 @@ class TestReadFileRecordBase64:
         """Should read from content attribute as bytes."""
         raw_bytes = b"content attribute bytes"
         file_obj = SimpleNamespace(content=raw_bytes)
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result == base64.b64encode(raw_bytes).decode("ascii")
@@ -557,7 +566,7 @@ class TestReadFileRecordBase64:
         """Should read from blob attribute as bytes."""
         raw_bytes = b"blob attribute bytes"
         file_obj = SimpleNamespace(blob=raw_bytes)
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result == base64.b64encode(raw_bytes).decode("ascii")
@@ -566,7 +575,7 @@ class TestReadFileRecordBase64:
     async def test_returns_none_when_no_data_source(self, pipe_instance_async):
         """Should return None when file_obj has no readable data."""
         file_obj = SimpleNamespace()
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result is None
@@ -578,7 +587,7 @@ class TestReadFileRecordBase64:
         file_obj = SimpleNamespace(content=raw_bytes)
 
         with pytest.raises(ValueError, match="File exceeds BASE64_MAX_SIZE_MB limit"):
-            await pipe_instance_async._multimodal_handler._read_file_record_base64(
+            await pipe_instance_async._file_gateway.read_file_record_base64(
                 file_obj, chunk_size=1024, max_bytes=100
             )
 
@@ -589,7 +598,7 @@ class TestReadFileRecordBase64:
             path="/nonexistent/path/file.bin",
             content=b"fallback content"
         )
-        result = await pipe_instance_async._multimodal_handler._read_file_record_base64(
+        result = await pipe_instance_async._file_gateway.read_file_record_base64(
             file_obj, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result == base64.b64encode(b"fallback content").decode("ascii")
@@ -610,7 +619,7 @@ class TestEncodeFilePathBase64:
         test_file.write_bytes(b"X" * 1000)
 
         with pytest.raises(ValueError, match="File exceeds BASE64_MAX_SIZE_MB limit"):
-            await pipe_instance_async._multimodal_handler._encode_file_path_base64(
+            await owui_files_module.encode_file_path_base64(
                 test_file, chunk_size=64, max_bytes=100
             )
 
@@ -626,7 +635,7 @@ class TestInlineOwuiFileId:
     @pytest.mark.asyncio
     async def test_returns_none_for_empty_file_id(self, pipe_instance_async):
         """Should return None for empty file ID."""
-        result = await pipe_instance_async._multimodal_handler._inline_owui_file_id(
+        result = await pipe_instance_async._file_gateway.inline_owui_file_id(
             "", chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result is None
@@ -634,22 +643,22 @@ class TestInlineOwuiFileId:
     @pytest.mark.asyncio
     async def test_returns_none_for_whitespace_file_id(self, pipe_instance_async):
         """Should return None for whitespace-only file ID."""
-        result = await pipe_instance_async._multimodal_handler._inline_owui_file_id(
+        result = await pipe_instance_async._file_gateway.inline_owui_file_id(
             "   ", chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_file_not_found(self, pipe_instance_async):
+    async def test_returns_none_when_file_not_found(self, pipe_instance_async, monkeypatch):
         """Should return None when file lookup returns None."""
-        pipe_instance_async._multimodal_handler._get_file_by_id = AsyncMock(return_value=None)
-        result = await pipe_instance_async._multimodal_handler._inline_owui_file_id(
+        monkeypatch.setattr(owui_files_module, "get_file_by_id", AsyncMock(return_value=None))
+        result = await pipe_instance_async._file_gateway.inline_owui_file_id(
             "nonexistent", chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_data_url_for_valid_file(self, pipe_instance_async, tmp_path):
+    async def test_returns_data_url_for_valid_file(self, pipe_instance_async, tmp_path, monkeypatch):
         """Should return data URL for valid file."""
         test_content = b"PNG file content"
         test_file = tmp_path / "test.png"
@@ -660,9 +669,9 @@ class TestInlineOwuiFileId:
             filename="test.png",
             meta={"content_type": "image/png", "name": "test.png"},
         )
-        pipe_instance_async._multimodal_handler._get_file_by_id = AsyncMock(return_value=file_obj)
+        monkeypatch.setattr(owui_files_module, "get_file_by_id", AsyncMock(return_value=file_obj))
 
-        result = await pipe_instance_async._multimodal_handler._inline_owui_file_id(
+        result = await pipe_instance_async._file_gateway.inline_owui_file_id(
             "file123", chunk_size=1024, max_bytes=1024 * 1024
         )
 
@@ -670,26 +679,26 @@ class TestInlineOwuiFileId:
         assert result == InlinedFile(data_url=f"data:image/png;base64,{expected_b64}", filename="test.png")
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_read_fails(self, pipe_instance_async):
+    async def test_returns_none_when_read_fails(self, pipe_instance_async, monkeypatch):
         """Should return None when file read raises ValueError."""
         file_obj = SimpleNamespace(
             meta={"content_type": "image/png"},
             content=b"X" * 1000
         )
-        pipe_instance_async._multimodal_handler._get_file_by_id = AsyncMock(return_value=file_obj)
+        monkeypatch.setattr(owui_files_module, "get_file_by_id", AsyncMock(return_value=file_obj))
 
-        result = await pipe_instance_async._multimodal_handler._inline_owui_file_id(
+        result = await pipe_instance_async._file_gateway.inline_owui_file_id(
             "file123", chunk_size=1024, max_bytes=10
         )
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_b64_is_none(self, pipe_instance_async):
+    async def test_returns_none_when_b64_is_none(self, pipe_instance_async, monkeypatch):
         """Should return None when _read_file_record_base64 returns None."""
         file_obj = SimpleNamespace(meta={"content_type": "image/png"})
-        pipe_instance_async._multimodal_handler._get_file_by_id = AsyncMock(return_value=file_obj)
+        monkeypatch.setattr(owui_files_module, "get_file_by_id", AsyncMock(return_value=file_obj))
 
-        result = await pipe_instance_async._multimodal_handler._inline_owui_file_id(
+        result = await pipe_instance_async._file_gateway.inline_owui_file_id(
             "file123", chunk_size=1024, max_bytes=1024 * 1024
         )
         assert result is None
@@ -706,7 +715,7 @@ class TestInlineInternalFileUrl:
     @pytest.mark.asyncio
     async def test_returns_none_for_non_internal_url(self, pipe_instance_async):
         """Should return None for external URLs."""
-        result = await pipe_instance_async._multimodal_handler._inline_internal_file_url(
+        result = await pipe_instance_async._file_gateway.inline_internal_file_url(
             "https://example.com/image.png",
             chunk_size=1024,
             max_bytes=1024 * 1024,
@@ -714,7 +723,7 @@ class TestInlineInternalFileUrl:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_inlines_internal_file_url(self, pipe_instance_async, tmp_path):
+    async def test_inlines_internal_file_url(self, pipe_instance_async, tmp_path, monkeypatch):
         """Should inline internal file URL to data URL."""
         test_content = b"file content"
         test_file = tmp_path / "test.bin"
@@ -725,9 +734,9 @@ class TestInlineInternalFileUrl:
             filename="test.bin",
             meta={"content_type": "application/octet-stream", "name": "test.bin"},
         )
-        pipe_instance_async._multimodal_handler._get_file_by_id = AsyncMock(return_value=file_obj)
+        monkeypatch.setattr(owui_files_module, "get_file_by_id", AsyncMock(return_value=file_obj))
 
-        result = await pipe_instance_async._multimodal_handler._inline_internal_file_url(
+        result = await pipe_instance_async._file_gateway.inline_internal_file_url(
             "http://localhost/api/v1/files/abc123/content",
             chunk_size=1024,
             max_bytes=1024 * 1024,
@@ -749,7 +758,7 @@ class TestInlineInternalResponsesInputFilesInplace:
     async def test_does_nothing_for_empty_input(self, pipe_instance_async):
         """Should do nothing when input is empty."""
         body = {"input": []}
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert body == {"input": []}
@@ -758,7 +767,7 @@ class TestInlineInternalResponsesInputFilesInplace:
     async def test_does_nothing_for_non_list_input(self, pipe_instance_async):
         """Should do nothing when input is not a list."""
         body = {"input": "not a list"}
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert body == {"input": "not a list"}
@@ -767,7 +776,7 @@ class TestInlineInternalResponsesInputFilesInplace:
     async def test_skips_non_dict_items(self, pipe_instance_async):
         """Should skip non-dict items in input."""
         body = {"input": ["string item", 123]}
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert body == {"input": ["string item", 123]}
@@ -776,7 +785,7 @@ class TestInlineInternalResponsesInputFilesInplace:
     async def test_skips_items_without_content(self, pipe_instance_async):
         """Should skip items without content."""
         body = {"input": [{"role": "user"}]}
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert body == {"input": [{"role": "user"}]}
@@ -789,7 +798,7 @@ class TestInlineInternalResponsesInputFilesInplace:
                 "content": [{"type": "text", "text": "hello"}]
             }]
         }
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert body["input"][0]["content"][0]["type"] == "text"
@@ -805,7 +814,7 @@ class TestInlineInternalResponsesInputFilesInplace:
                 }]
             }]
         }
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert body["input"][0]["content"][0]["file_id"] == "file-abc123"
@@ -822,14 +831,14 @@ class TestInlineInternalResponsesInputFilesInplace:
             }]
         }
 
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
 
         assert body["input"][0]["content"][0]["file_url"] == "https://example.com/external-file.pdf"
 
     @pytest.mark.asyncio
-    async def test_inlines_internal_file_id(self, pipe_instance_async, tmp_path):
+    async def test_inlines_internal_file_id(self, pipe_instance_async, tmp_path, monkeypatch):
         """Should inline internal file_id to file_data."""
         test_content = b"file content"
         test_file = tmp_path / "test.bin"
@@ -839,7 +848,7 @@ class TestInlineInternalResponsesInputFilesInplace:
             path=str(test_file),
             meta={"content_type": "application/pdf"}
         )
-        pipe_instance_async._multimodal_handler._get_file_by_id = AsyncMock(return_value=file_obj)
+        monkeypatch.setattr(owui_files_module, "get_file_by_id", AsyncMock(return_value=file_obj))
 
         body = {
             "input": [{
@@ -850,7 +859,7 @@ class TestInlineInternalResponsesInputFilesInplace:
             }]
         }
 
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
 
@@ -862,7 +871,7 @@ class TestInlineInternalResponsesInputFilesInplace:
         assert "file_id" not in block
 
     @pytest.mark.asyncio
-    async def test_inlines_internal_file_data_url(self, pipe_instance_async, tmp_path):
+    async def test_inlines_internal_file_data_url(self, pipe_instance_async, tmp_path, monkeypatch):
         """Should inline internal file_data URL."""
         test_content = b"file content"
         test_file = tmp_path / "test.bin"
@@ -872,18 +881,18 @@ class TestInlineInternalResponsesInputFilesInplace:
             path=str(test_file),
             meta={"content_type": "application/pdf"}
         )
-        pipe_instance_async._multimodal_handler._get_file_by_id = AsyncMock(return_value=file_obj)
+        monkeypatch.setattr(owui_files_module, "get_file_by_id", AsyncMock(return_value=file_obj))
 
         body = {
             "input": [{
                 "content": [{
                     "type": "input_file",
-                    "file_data": "http://localhost/api/v1/files/xyz789/content"
+                    "file_data": "/api/v1/files/xyz789/content"
                 }]
             }]
         }
 
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
 
@@ -891,7 +900,7 @@ class TestInlineInternalResponsesInputFilesInplace:
         assert block["file_data"].startswith("data:")
 
     @pytest.mark.asyncio
-    async def test_inlines_internal_file_url(self, pipe_instance_async, tmp_path):
+    async def test_inlines_internal_file_url(self, pipe_instance_async, tmp_path, monkeypatch):
         """Should inline internal file_url."""
         test_content = b"file content"
         test_file = tmp_path / "test.bin"
@@ -901,18 +910,18 @@ class TestInlineInternalResponsesInputFilesInplace:
             path=str(test_file),
             meta={"content_type": "application/pdf"}
         )
-        pipe_instance_async._multimodal_handler._get_file_by_id = AsyncMock(return_value=file_obj)
+        monkeypatch.setattr(owui_files_module, "get_file_by_id", AsyncMock(return_value=file_obj))
 
         body = {
             "input": [{
                 "content": [{
                     "type": "input_file",
-                    "file_url": "http://localhost/api/v1/files/abc123/content"
+                    "file_url": "/api/v1/files/abc123/content"
                 }]
             }]
         }
 
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
 
@@ -921,9 +930,9 @@ class TestInlineInternalResponsesInputFilesInplace:
         assert "file_url" not in block
 
     @pytest.mark.asyncio
-    async def test_raises_when_inlining_fails(self, pipe_instance_async):
+    async def test_raises_when_inlining_fails(self, pipe_instance_async, monkeypatch):
         """Should raise ValueError when inlining fails."""
-        pipe_instance_async._multimodal_handler._get_file_by_id = AsyncMock(return_value=None)
+        monkeypatch.setattr(owui_files_module, "get_file_by_id", AsyncMock(return_value=None))
 
         body = {
             "input": [{
@@ -935,7 +944,7 @@ class TestInlineInternalResponsesInputFilesInplace:
         }
 
         with pytest.raises(ValueError, match="Failed to inline Open WebUI file id"):
-            await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+            await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
                 body, chunk_size=1024, max_bytes=1024 * 1024
             )
 
@@ -947,7 +956,7 @@ class TestInlineInternalResponsesInputFilesInplace:
                 "content": "not a list"
             }]
         }
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert body["input"][0]["content"] == "not a list"
@@ -960,7 +969,7 @@ class TestInlineInternalResponsesInputFilesInplace:
                 "content": ["string block", 123, None]
             }]
         }
-        await pipe_instance_async._multimodal_handler._inline_internal_responses_input_files_inplace(
+        await pipe_instance_async._file_gateway.inline_internal_responses_input_files_inplace(
             body, chunk_size=1024, max_bytes=1024 * 1024
         )
         assert body["input"][0]["content"] == ["string block", 123, None]
@@ -977,7 +986,7 @@ class TestTryLinkFileToChat:
     @pytest.mark.asyncio
     async def test_returns_false_for_non_string_chat_id(self, pipe_instance_async):
         """Should return False for non-string chat_id."""
-        result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+        result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
             chat_id=123,
             message_id="msg-1",
             file_id="file-1",
@@ -988,7 +997,7 @@ class TestTryLinkFileToChat:
     @pytest.mark.asyncio
     async def test_returns_false_for_empty_chat_id(self, pipe_instance_async):
         """Should return False for empty chat_id."""
-        result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+        result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
             chat_id="",
             message_id="msg-1",
             file_id="file-1",
@@ -999,7 +1008,7 @@ class TestTryLinkFileToChat:
     @pytest.mark.asyncio
     async def test_returns_false_for_local_chat_id(self, pipe_instance_async):
         """Should return False for chat_id starting with 'local:'."""
-        result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+        result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
             chat_id="local:temp-chat",
             message_id="msg-1",
             file_id="file-1",
@@ -1010,7 +1019,7 @@ class TestTryLinkFileToChat:
     @pytest.mark.asyncio
     async def test_returns_false_for_empty_file_id(self, pipe_instance_async):
         """Should return False for empty file_id."""
-        result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+        result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
             chat_id="chat-1",
             message_id="msg-1",
             file_id="",
@@ -1021,7 +1030,7 @@ class TestTryLinkFileToChat:
     @pytest.mark.asyncio
     async def test_returns_false_for_non_string_user_id(self, pipe_instance_async):
         """Should return False for non-string user_id."""
-        result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+        result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
             chat_id="chat-1",
             message_id="msg-1",
             file_id="file-1",
@@ -1032,7 +1041,7 @@ class TestTryLinkFileToChat:
     @pytest.mark.asyncio
     async def test_returns_false_for_empty_user_id(self, pipe_instance_async):
         """Should return False for empty user_id."""
-        result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+        result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
             chat_id="chat-1",
             message_id="msg-1",
             file_id="file-1",
@@ -1050,7 +1059,7 @@ class TestTryLinkFileToChat:
                 del sys.modules["open_webui.models.chats"]
 
             with patch.dict(sys.modules, {"open_webui.models.chats": None}):
-                await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+                await pipe_instance_async._file_gateway.try_link_file_to_chat(
                     chat_id="chat-123",
                     message_id="msg-456",
                     file_id="file-789",
@@ -1081,7 +1090,7 @@ class TestTryLinkFileToChat:
 
         try:
             chats_mod.Chats = MockChats
-            result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+            result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
                 chat_id="chat-123",
                 message_id="msg-456",
                 file_id="file-789",
@@ -1115,7 +1124,7 @@ class TestTryLinkFileToChat:
 
         try:
             chats_mod.Chats = MockChats
-            result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+            result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
                 chat_id="chat-123",
                 message_id="msg-456",
                 file_id="file-789",
@@ -1137,7 +1146,7 @@ class TestTryLinkFileToChat:
 
         try:
             chats_mod.Chats = MockChats
-            result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+            result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
                 chat_id="chat-123",
                 message_id="msg-456",
                 file_id="file-789",
@@ -1160,7 +1169,7 @@ class TestTryLinkFileToChat:
 
         try:
             chats_mod.Chats = MockChats
-            result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+            result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
                 chat_id="chat-123",
                 message_id="msg-456",
                 file_id="file-789",
@@ -1191,7 +1200,7 @@ class TestTryLinkFileToChat:
 
         try:
             chats_mod.Chats = MockChats
-            result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+            result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
                 chat_id="chat-123",
                 message_id=None,
                 file_id="file-789",
@@ -1217,7 +1226,7 @@ class TestTryLinkFileToChat:
 
         try:
             chats_mod.Chats = MockChats
-            result = await pipe_instance_async._multimodal_handler._try_link_file_to_chat(
+            result = await pipe_instance_async._file_gateway.try_link_file_to_chat(
                 chat_id="chat-123",
                 message_id="msg-456",
                 file_id="file-789",
@@ -1239,7 +1248,7 @@ class TestResolveStorageContext:
     @pytest.mark.asyncio
     async def test_returns_none_when_request_is_none(self, pipe_instance_async, mock_user):
         """Should return (None, None) when request is None."""
-        request, user = await pipe_instance_async._multimodal_handler._resolve_storage_context(None, mock_user)
+        request, user = await pipe_instance_async._file_gateway.resolve_storage_context(None, mock_user)
         assert request is None
         assert user is None
 
@@ -1248,7 +1257,7 @@ class TestResolveStorageContext:
         self, pipe_instance_async, mock_request, mock_user
     ):
         """Should return provided user when available."""
-        request, user = await pipe_instance_async._multimodal_handler._resolve_storage_context(
+        request, user = await pipe_instance_async._file_gateway.resolve_storage_context(
             mock_request, mock_user
         )
         assert request is mock_request
@@ -1257,9 +1266,9 @@ class TestResolveStorageContext:
     @pytest.mark.asyncio
     async def test_returns_none_when_fallback_user_fails(self, pipe_instance_async, mock_request):
         """Should return (None, None) when fallback user creation fails."""
-        pipe_instance_async._multimodal_handler._ensure_storage_user = AsyncMock(return_value=None)
+        pipe_instance_async._file_gateway.ensure_storage_user = AsyncMock(return_value=None)
 
-        request, user = await pipe_instance_async._multimodal_handler._resolve_storage_context(mock_request, None)
+        request, user = await pipe_instance_async._file_gateway.resolve_storage_context(mock_request, None)
         assert request is None
         assert user is None
 
@@ -1271,11 +1280,11 @@ class TestResolveStorageContext:
             email="fallback@system.local"
         )
 
-        pipe_instance_async._multimodal_handler._ensure_storage_user = AsyncMock(
+        pipe_instance_async._file_gateway.ensure_storage_user = AsyncMock(
             return_value=fallback_user
         )
 
-        request, user = await pipe_instance_async._multimodal_handler._resolve_storage_context(
+        request, user = await pipe_instance_async._file_gateway.resolve_storage_context(
             mock_request, None
         )
 
@@ -1294,81 +1303,77 @@ class TestEnsureStorageUser:
     @pytest.mark.asyncio
     async def test_returns_none_when_users_unavailable(self, pipe_instance_async):
         """Should return None when Users module unavailable."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
         try:
-            multimodal_module.Users = None
-            result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+            owui_files_module.Users = None
+            result = await pipe_instance_async._file_gateway.ensure_storage_user()
             assert result is None
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
     @pytest.mark.asyncio
     async def test_returns_cached_user(self, pipe_instance_async):
         """Should return cached user on subsequent calls."""
         cached_user = Mock()
         cached_user.email = "cached@example.com"
-        pipe_instance_async._multimodal_handler._storage_user_cache = cached_user
+        pipe_instance_async._file_gateway._storage_user_cache = cached_user
 
-        result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+        result = await pipe_instance_async._file_gateway.ensure_storage_user()
         assert result is cached_user
 
     @pytest.mark.asyncio
     async def test_warns_on_privileged_role(self, pipe_instance_async, caplog):
         """Should warn when using privileged role."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         mock_users = Mock()
         mock_user = Mock()
         mock_user.email = "test@system.local"
         mock_users.get_user_by_email = AsyncMock(return_value=mock_user)
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
         try:
-            multimodal_module.Users = mock_users
-            pipe_instance_async._multimodal_handler._storage_user_cache = None
+            owui_files_module.Users = mock_users
+            pipe_instance_async._file_gateway._storage_user_cache = None
             pipe_instance_async.valves.FALLBACK_STORAGE_ROLE = "admin"
 
             with caplog.at_level(logging.WARNING):
-                await pipe_instance_async._multimodal_handler._ensure_storage_user()
+                await pipe_instance_async._file_gateway.ensure_storage_user()
 
             assert "highly privileged" in caplog.text
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
     @pytest.mark.asyncio
     async def test_returns_cached_user_after_lock(self, pipe_instance_async):
         """Should return cached user if another task set it while waiting for lock."""
         import asyncio
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         mock_users = Mock()
         mock_users.get_user_by_email = AsyncMock(return_value=None)
 
         cached_user = SimpleNamespace(id="cached-user", email="cached@example.com")
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
         try:
-            multimodal_module.Users = mock_users
-            pipe_instance_async._multimodal_handler._storage_user_lock = asyncio.Lock()
-            pipe_instance_async._multimodal_handler._storage_user_cache = None
+            owui_files_module.Users = mock_users
+            pipe_instance_async._file_gateway._storage_user_lock = asyncio.Lock()
+            pipe_instance_async._file_gateway._storage_user_cache = None
 
             async def set_cache_during_wait():
-                pipe_instance_async._multimodal_handler._storage_user_cache = cached_user
+                pipe_instance_async._file_gateway._storage_user_cache = cached_user
 
             await set_cache_during_wait()
 
-            result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+            result = await pipe_instance_async._file_gateway.ensure_storage_user()
 
             assert result is cached_user
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
     @pytest.mark.asyncio
     async def test_creates_user_when_not_exists(self, pipe_instance_async):
         """Should create new user when not found by email."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         created_user = SimpleNamespace(
             id="new-user-id",
@@ -1379,23 +1384,22 @@ class TestEnsureStorageUser:
         mock_users.get_user_by_email = AsyncMock(return_value=None)
         mock_users.insert_new_user = AsyncMock(return_value=created_user)
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
         try:
-            multimodal_module.Users = mock_users
-            pipe_instance_async._multimodal_handler._storage_user_cache = None
-            pipe_instance_async._multimodal_handler._user_insert_param_names = None
+            owui_files_module.Users = mock_users
+            pipe_instance_async._file_gateway._storage_user_cache = None
+            pipe_instance_async._file_gateway._user_insert_param_names = None
 
-            result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+            result = await pipe_instance_async._file_gateway.ensure_storage_user()
 
             assert result is created_user
             mock_users.insert_new_user.assert_called_once()
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
     @pytest.mark.asyncio
     async def test_handles_oauth_param_name(self, pipe_instance_async):
         """Should handle 'oauth' parameter in insert signature."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         created_user = SimpleNamespace(
             id="new-user-id",
@@ -1409,21 +1413,20 @@ class TestEnsureStorageUser:
         mock_users.get_user_by_email = AsyncMock(return_value=None)
         mock_users.insert_new_user = mock_insert
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
         try:
-            multimodal_module.Users = mock_users
-            pipe_instance_async._multimodal_handler._storage_user_cache = None
-            pipe_instance_async._multimodal_handler._user_insert_param_names = None
+            owui_files_module.Users = mock_users
+            pipe_instance_async._file_gateway._storage_user_cache = None
+            pipe_instance_async._file_gateway._user_insert_param_names = None
 
-            result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+            result = await pipe_instance_async._file_gateway.ensure_storage_user()
             assert result is created_user
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
     @pytest.mark.asyncio
     async def test_handles_oauth_sub_param_name(self, pipe_instance_async):
         """Should handle 'oauth_sub' parameter in insert signature."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         created_user = SimpleNamespace(
             id="new-user-id",
@@ -1437,59 +1440,56 @@ class TestEnsureStorageUser:
         mock_users.get_user_by_email = AsyncMock(return_value=None)
         mock_users.insert_new_user = mock_insert
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
         try:
-            multimodal_module.Users = mock_users
-            pipe_instance_async._multimodal_handler._storage_user_cache = None
-            pipe_instance_async._multimodal_handler._user_insert_param_names = None
+            owui_files_module.Users = mock_users
+            pipe_instance_async._file_gateway._storage_user_cache = None
+            pipe_instance_async._file_gateway._user_insert_param_names = None
 
-            result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+            result = await pipe_instance_async._file_gateway.ensure_storage_user()
             assert result is created_user
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
     @pytest.mark.asyncio
     async def test_returns_none_when_get_user_raises(self, pipe_instance_async):
         """Should return None when get_user_by_email raises exception."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         mock_users = Mock()
         mock_users.get_user_by_email = AsyncMock(side_effect=RuntimeError("DB error"))
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
         try:
-            multimodal_module.Users = mock_users
-            pipe_instance_async._multimodal_handler._storage_user_cache = None
+            owui_files_module.Users = mock_users
+            pipe_instance_async._file_gateway._storage_user_cache = None
 
-            result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+            result = await pipe_instance_async._file_gateway.ensure_storage_user()
             assert result is None
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
     @pytest.mark.asyncio
     async def test_returns_none_when_insert_raises(self, pipe_instance_async):
         """Should return None when insert_new_user raises exception."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         mock_users = Mock()
         mock_users.get_user_by_email = AsyncMock(return_value=None)
         mock_users.insert_new_user = AsyncMock(side_effect=RuntimeError("Insert failed"))
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
         try:
-            multimodal_module.Users = mock_users
-            pipe_instance_async._multimodal_handler._storage_user_cache = None
-            pipe_instance_async._multimodal_handler._user_insert_param_names = None
+            owui_files_module.Users = mock_users
+            pipe_instance_async._file_gateway._storage_user_cache = None
+            pipe_instance_async._file_gateway._user_insert_param_names = None
 
-            result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+            result = await pipe_instance_async._file_gateway.ensure_storage_user()
             assert result is None
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
     @pytest.mark.asyncio
     async def test_handles_signature_inspection_error(self, pipe_instance_async):
         """Should handle error when inspecting insert signature."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         created_user = SimpleNamespace(
             id="new-user-id",
@@ -1507,16 +1507,16 @@ class TestEnsureStorageUser:
         mock_users.get_user_by_email = AsyncMock(return_value=None)
         mock_users.insert_new_user = non_inspectable
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
         try:
-            multimodal_module.Users = mock_users
-            pipe_instance_async._multimodal_handler._storage_user_cache = None
-            pipe_instance_async._multimodal_handler._user_insert_param_names = None
+            owui_files_module.Users = mock_users
+            pipe_instance_async._file_gateway._storage_user_cache = None
+            pipe_instance_async._file_gateway._user_insert_param_names = None
 
-            result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+            result = await pipe_instance_async._file_gateway.ensure_storage_user()
             assert result is created_user
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
 
 # ---------------------------------------------------------------------------
@@ -1961,18 +1961,18 @@ class TestValidateBase64Size:
 
     def test_returns_true_for_empty_string(self, pipe_instance):
         """Should return True for empty string."""
-        assert pipe_instance._multimodal_handler._validate_base64_size("") is True
+        assert pipe_instance._file_gateway.validate_base64_size("") is True
 
     def test_returns_true_for_small_data(self, pipe_instance):
         """Should return True for data within limits."""
         small_b64 = base64.b64encode(b"small data").decode("ascii")
-        assert pipe_instance._multimodal_handler._validate_base64_size(small_b64) is True
+        assert pipe_instance._file_gateway.validate_base64_size(small_b64) is True
 
     def test_returns_false_for_large_data(self, pipe_instance):
         """Should return False for data exceeding limits."""
         pipe_instance.valves.BASE64_MAX_SIZE_MB = 0.00001
         large_b64 = "A" * 100000
-        assert pipe_instance._multimodal_handler._validate_base64_size(large_b64) is False
+        assert pipe_instance._file_gateway.validate_base64_size(large_b64) is False
 
 
 # ---------------------------------------------------------------------------
@@ -2155,10 +2155,14 @@ class TestFetchImageAsDataUrl:
                         session, "https://openrouter.ai/photo.jpg"
                     )
                 finally:
-                    if original_pil:
+                    if original_pil is not None:
                         sys.modules["PIL"] = original_pil
-                    if original_pil_image:
+                    else:
+                        sys.modules.pop("PIL", None)
+                    if original_pil_image is not None:
                         sys.modules["PIL.Image"] = original_pil_image
+                    else:
+                        sys.modules.pop("PIL.Image", None)
 
                 assert result is None or result.startswith("data:")
 
@@ -2463,78 +2467,73 @@ class TestUploadToOwuiStorage:
         self, pipe_instance_async, mock_request, mock_user
     ):
         """Should return None when upload helpers are not available."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
-        original_handler = multimodal_module.upload_file_handler
+        original_handler = owui_files_module.upload_file_handler
         try:
-            multimodal_module.upload_file_handler = None
-            result = await pipe_instance_async._multimodal_handler._upload_to_owui_storage(
+            owui_files_module.upload_file_handler = None
+            result = await pipe_instance_async._file_gateway.upload_to_owui_storage(
                 mock_request, mock_user, b"test data", "test.txt", "text/plain"
             )
             assert result is None
         finally:
-            multimodal_module.upload_file_handler = original_handler
+            owui_files_module.upload_file_handler = original_handler
 
     @pytest.mark.asyncio
     async def test_handles_dict_response(self, pipe_instance_async, mock_request, mock_user):
         """Should handle dict response from upload handler."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         async def mock_upload_handler(*args, **kwargs):
             return {"id": "dict-file-id"}
 
-        original_handler = multimodal_module.upload_file_handler
+        original_handler = owui_files_module.upload_file_handler
         try:
-            multimodal_module.upload_file_handler = mock_upload_handler
-            result = await pipe_instance_async._multimodal_handler._upload_to_owui_storage(
+            owui_files_module.upload_file_handler = mock_upload_handler
+            result = await pipe_instance_async._file_gateway.upload_to_owui_storage(
                 mock_request, mock_user, b"test data", "test.txt", "text/plain"
             )
             assert result == "dict-file-id"
         finally:
-            multimodal_module.upload_file_handler = original_handler
+            owui_files_module.upload_file_handler = original_handler
 
     @pytest.mark.asyncio
     async def test_handles_object_response(self, pipe_instance_async, mock_request, mock_user):
         """Should handle object response with id attribute."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         async def mock_upload_handler(*args, **kwargs):
             return SimpleNamespace(id="object-file-id")
 
-        original_handler = multimodal_module.upload_file_handler
+        original_handler = owui_files_module.upload_file_handler
         try:
-            multimodal_module.upload_file_handler = mock_upload_handler
-            result = await pipe_instance_async._multimodal_handler._upload_to_owui_storage(
+            owui_files_module.upload_file_handler = mock_upload_handler
+            result = await pipe_instance_async._file_gateway.upload_to_owui_storage(
                 mock_request, mock_user, b"test data", "test.txt", "text/plain"
             )
             assert result == "object-file-id"
         finally:
-            multimodal_module.upload_file_handler = original_handler
+            owui_files_module.upload_file_handler = original_handler
 
     @pytest.mark.asyncio
     async def test_returns_none_on_exception(self, pipe_instance_async, mock_request, mock_user):
         """Should return None and log error on exception."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         async def mock_upload_handler(*args, **kwargs):
             raise RuntimeError("Upload failed")
 
-        original_handler = multimodal_module.upload_file_handler
+        original_handler = owui_files_module.upload_file_handler
         try:
-            multimodal_module.upload_file_handler = mock_upload_handler
-            result = await pipe_instance_async._multimodal_handler._upload_to_owui_storage(
+            owui_files_module.upload_file_handler = mock_upload_handler
+            result = await pipe_instance_async._file_gateway.upload_to_owui_storage(
                 mock_request, mock_user, b"test data", "test.txt", "text/plain"
             )
             assert result is None
         finally:
-            multimodal_module.upload_file_handler = original_handler
+            owui_files_module.upload_file_handler = original_handler
 
     @pytest.mark.asyncio
     async def test_skips_local_chat_id_in_metadata(
         self, pipe_instance_async, mock_request, mock_user
     ):
         """Should skip chat_id in metadata if it starts with 'local:'."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         captured_metadata = None
 
@@ -2543,30 +2542,29 @@ class TestUploadToOwuiStorage:
             captured_metadata = kwargs.get("metadata", {})
             return SimpleNamespace(id="file-id")
 
-        original_handler = multimodal_module.upload_file_handler
+        original_handler = owui_files_module.upload_file_handler
         try:
-            multimodal_module.upload_file_handler = mock_upload_handler
-            await pipe_instance_async._multimodal_handler._upload_to_owui_storage(
+            owui_files_module.upload_file_handler = mock_upload_handler
+            await pipe_instance_async._file_gateway.upload_to_owui_storage(
                 mock_request, mock_user, b"test data", "test.txt", "text/plain",
                 chat_id="local:temp-chat"
             )
             assert "chat_id" not in captured_metadata
         finally:
-            multimodal_module.upload_file_handler = original_handler
+            owui_files_module.upload_file_handler = original_handler
 
     @pytest.mark.asyncio
     async def test_uses_owui_user_id_override(self, pipe_instance_async, mock_request, mock_user):
         """Should use owui_user_id when provided instead of user.id."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         captured_user_id = None
 
         async def mock_upload_handler(*args, **kwargs):
             return SimpleNamespace(id="uploaded-file-id")
 
-        original_handler = multimodal_module.upload_file_handler
+        original_handler = owui_files_module.upload_file_handler
 
-        original_link = pipe_instance_async._multimodal_handler._try_link_file_to_chat
+        original_link = pipe_instance_async._file_gateway.try_link_file_to_chat
 
         def capture_link(*, chat_id, message_id, file_id, user_id):
             nonlocal captured_user_id
@@ -2574,10 +2572,10 @@ class TestUploadToOwuiStorage:
             return True
 
         try:
-            multimodal_module.upload_file_handler = mock_upload_handler
-            pipe_instance_async._multimodal_handler._try_link_file_to_chat = capture_link
+            owui_files_module.upload_file_handler = mock_upload_handler
+            pipe_instance_async._file_gateway.try_link_file_to_chat = capture_link
 
-            await pipe_instance_async._multimodal_handler._upload_to_owui_storage(
+            await pipe_instance_async._file_gateway.upload_to_owui_storage(
                 mock_request, mock_user, b"test data", "test.txt", "text/plain",
                 chat_id="chat-123",
                 owui_user_id="override-user-id"
@@ -2585,13 +2583,12 @@ class TestUploadToOwuiStorage:
 
             assert captured_user_id == "override-user-id"
         finally:
-            multimodal_module.upload_file_handler = original_handler
-            pipe_instance_async._multimodal_handler._try_link_file_to_chat = original_link
+            owui_files_module.upload_file_handler = original_handler
+            pipe_instance_async._file_gateway.try_link_file_to_chat = original_link
 
     @pytest.mark.asyncio
     async def test_swallows_link_exception(self, pipe_instance_async, mock_request, mock_user):
         """Should swallow exception from _try_link_file_to_chat and still return file_id."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         async def mock_upload_handler(*args, **kwargs):
             return SimpleNamespace(id="uploaded-file-id")
@@ -2599,67 +2596,64 @@ class TestUploadToOwuiStorage:
         def mock_link_raises(*args, **kwargs):
             raise RuntimeError("Link failed!")
 
-        original_handler = multimodal_module.upload_file_handler
-        original_link = pipe_instance_async._multimodal_handler._try_link_file_to_chat
+        original_handler = owui_files_module.upload_file_handler
+        original_link = pipe_instance_async._file_gateway.try_link_file_to_chat
 
         try:
-            multimodal_module.upload_file_handler = mock_upload_handler
-            pipe_instance_async._multimodal_handler._try_link_file_to_chat = mock_link_raises
+            owui_files_module.upload_file_handler = mock_upload_handler
+            pipe_instance_async._file_gateway.try_link_file_to_chat = mock_link_raises
 
-            result = await pipe_instance_async._multimodal_handler._upload_to_owui_storage(
+            result = await pipe_instance_async._file_gateway.upload_to_owui_storage(
                 mock_request, mock_user, b"test data", "test.txt", "text/plain",
                 chat_id="chat-123"
             )
 
             assert result == "uploaded-file-id"
         finally:
-            multimodal_module.upload_file_handler = original_handler
-            pipe_instance_async._multimodal_handler._try_link_file_to_chat = original_link
+            owui_files_module.upload_file_handler = original_handler
+            pipe_instance_async._file_gateway.try_link_file_to_chat = original_link
 
     @pytest.mark.asyncio
     async def test_handles_response_without_id(self, pipe_instance_async, mock_request, mock_user):
         """Should return None when response has no id."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         async def mock_upload_handler(*args, **kwargs):
             return SimpleNamespace()
 
-        original_handler = multimodal_module.upload_file_handler
+        original_handler = owui_files_module.upload_file_handler
         try:
-            multimodal_module.upload_file_handler = mock_upload_handler
-            result = await pipe_instance_async._multimodal_handler._upload_to_owui_storage(
+            owui_files_module.upload_file_handler = mock_upload_handler
+            result = await pipe_instance_async._file_gateway.upload_to_owui_storage(
                 mock_request, mock_user, b"test data", "test.txt", "text/plain"
             )
             assert result is None
         finally:
-            multimodal_module.upload_file_handler = original_handler
+            owui_files_module.upload_file_handler = original_handler
 
     @pytest.mark.asyncio
     async def test_handles_dict_response_without_id(
         self, pipe_instance_async, mock_request, mock_user
     ):
         """Should return None when dict response has no id."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         async def mock_upload_handler(*args, **kwargs):
             return {"status": "ok"}
 
-        original_handler = multimodal_module.upload_file_handler
+        original_handler = owui_files_module.upload_file_handler
         try:
-            multimodal_module.upload_file_handler = mock_upload_handler
-            result = await pipe_instance_async._multimodal_handler._upload_to_owui_storage(
+            owui_files_module.upload_file_handler = mock_upload_handler
+            result = await pipe_instance_async._file_gateway.upload_to_owui_storage(
                 mock_request, mock_user, b"test data", "test.txt", "text/plain"
             )
             assert result is None
         finally:
-            multimodal_module.upload_file_handler = original_handler
+            owui_files_module.upload_file_handler = original_handler
 
     @pytest.mark.asyncio
     async def test_includes_chat_id_and_message_id_in_metadata(
         self, pipe_instance_async, mock_request, mock_user
     ):
         """Should include valid chat_id and message_id in metadata."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
 
         captured_metadata = None
 
@@ -2668,10 +2662,10 @@ class TestUploadToOwuiStorage:
             captured_metadata = kwargs.get("metadata", {})
             return SimpleNamespace(id="file-id")
 
-        original_handler = multimodal_module.upload_file_handler
+        original_handler = owui_files_module.upload_file_handler
         try:
-            multimodal_module.upload_file_handler = mock_upload_handler
-            await pipe_instance_async._multimodal_handler._upload_to_owui_storage(
+            owui_files_module.upload_file_handler = mock_upload_handler
+            await pipe_instance_async._file_gateway.upload_to_owui_storage(
                 mock_request, mock_user, b"test data", "test.txt", "text/plain",
                 chat_id="chat-123",
                 message_id="msg-456"
@@ -2679,7 +2673,7 @@ class TestUploadToOwuiStorage:
             assert captured_metadata.get("chat_id") == "chat-123"
             assert captured_metadata.get("message_id") == "msg-456"
         finally:
-            multimodal_module.upload_file_handler = original_handler
+            owui_files_module.upload_file_handler = original_handler
 
 
 # ===== From test_multimodal_inputs.py =====
@@ -2831,10 +2825,10 @@ class TestImageTransformations:
                 "url": "https://example.com/cat.png",
             }
         )
-        pipe_instance._multimodal_handler._upload_to_owui_storage = AsyncMock(
+        pipe_instance._file_gateway.upload_to_owui_storage = AsyncMock(
             return_value="cat123"
         )
-        pipe_instance._multimodal_handler._inline_owui_file_id = AsyncMock(
+        pipe_instance._file_gateway.inline_owui_file_id = AsyncMock(
             return_value=InlinedFile(data_url="data:image/png;base64,INLINED==", filename="test.png")
         )
 
@@ -2854,9 +2848,9 @@ class TestImageTransformations:
         assert transformed["type"] == "input_image"
         assert transformed["image_url"] == "data:image/png;base64,INLINED=="
         pipe_instance._multimodal_handler._download_remote_url.assert_awaited_once()
-        pipe_instance._multimodal_handler._upload_to_owui_storage.assert_awaited_once()
-        pipe_instance._multimodal_handler._inline_owui_file_id.assert_awaited_once()
-        inline_args = pipe_instance._multimodal_handler._inline_owui_file_id.await_args
+        pipe_instance._file_gateway.upload_to_owui_storage.assert_awaited_once()
+        pipe_instance._file_gateway.inline_owui_file_id.assert_awaited_once()
+        inline_args = pipe_instance._file_gateway.inline_owui_file_id.await_args
         assert inline_args is not None
         assert inline_args.args[0] == "cat123"
 
@@ -2875,7 +2869,7 @@ class TestFileEncoding:
         file_path.write_bytes(data)
 
         expected = base64.b64encode(data).decode("ascii")
-        result = await pipe_instance._multimodal_handler._encode_file_path_base64(
+        result = await owui_files_module.encode_file_path_base64(
             file_path,
             chunk_size=64 * 1024,
             max_bytes=len(data) + 1024,
@@ -3205,7 +3199,7 @@ class TestStorageContext:
         mock_request,
         mock_user,
     ):
-        request, user = await pipe_instance._multimodal_handler._resolve_storage_context(
+        request, user = await pipe_instance._file_gateway.resolve_storage_context(
             mock_request,
             mock_user,
         )
@@ -3221,23 +3215,23 @@ class TestStorageContext:
         fallback_user = Mock()
         fallback_user.email = "fallback@example.com"
         # Mock the handler's method directly (not the pipe's delegation method)
-        pipe_instance._multimodal_handler._ensure_storage_user = AsyncMock(return_value=fallback_user)
+        pipe_instance._file_gateway.ensure_storage_user = AsyncMock(return_value=fallback_user)
 
-        request, user = await pipe_instance._multimodal_handler._resolve_storage_context(mock_request, None)
+        request, user = await pipe_instance._file_gateway.resolve_storage_context(mock_request, None)
         assert request is mock_request
         assert user is fallback_user
-        pipe_instance._multimodal_handler._ensure_storage_user.assert_awaited_once()
+        pipe_instance._file_gateway.ensure_storage_user.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_resolve_storage_context_without_request(
         self,
         pipe_instance,
     ):
-        pipe_instance._multimodal_handler._ensure_storage_user = AsyncMock()
-        request, user = await pipe_instance._multimodal_handler._resolve_storage_context(None, None)
+        pipe_instance._file_gateway.ensure_storage_user = AsyncMock()
+        request, user = await pipe_instance._file_gateway.resolve_storage_context(None, None)
         assert request is None
         assert user is None
-        pipe_instance._multimodal_handler._ensure_storage_user.assert_not_called()
+        pipe_instance._file_gateway.ensure_storage_user.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3262,8 +3256,8 @@ class TestImageTransformer:
         upload_mock = AsyncMock(return_value=stored_id)
         inline_mock = AsyncMock(return_value=InlinedFile(data_url="data:image/png;base64,INLINE", filename="test.png"))
         status_mock = AsyncMock()
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", upload_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_inline_owui_file_id", inline_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", upload_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "inline_owui_file_id", inline_mock)
         monkeypatch.setattr(pipe_instance._event_emitter_handler, "_emit_status", status_mock)
 
         block = {
@@ -3300,8 +3294,8 @@ class TestImageTransformer:
         inline_mock = AsyncMock(return_value=InlinedFile(data_url="data:image/png;base64,INLINE", filename="test.png"))
         status_mock = AsyncMock()
         monkeypatch.setattr(pipe_instance._multimodal_handler, "_download_remote_url", download_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", upload_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_inline_owui_file_id", inline_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", upload_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "inline_owui_file_id", inline_mock)
         monkeypatch.setattr(pipe_instance._event_emitter_handler, "_emit_status", status_mock)
 
         block = {"type": "image_url", "image_url": {"url": remote_url, "detail": "auto"}}
@@ -3327,11 +3321,11 @@ class TestImageTransformer:
         monkeypatch,
     ):
         """Explicit detail selection should survive transformation."""
-        async def fake_inline(file_id, chunk_size, max_bytes):  # type: ignore[no-untyped-def]
+        async def fake_inline(file_id, *, chunk_size, max_bytes, user=None):  # type: ignore[no-untyped-def]
             assert file_id == "abc"
             return InlinedFile(data_url="data:image/png;base64,abc", filename="test.png")
 
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_inline_owui_file_id", fake_inline)
+        monkeypatch.setattr(pipe_instance._file_gateway, "inline_owui_file_id", fake_inline)
         block = {"type": "image_url", "image_url": {"url": "/api/v1/files/abc", "detail": "low"}}
         image_block = await _transform_single_block(pipe_instance, block, mock_request, mock_user)
         assert image_block is not None
@@ -3355,11 +3349,10 @@ class TestImageTransformer:
             path = str(file_path)
             meta = {"content_type": "image/png"}
 
-        async def fake_get_file(_file_id):
+        async def fake_get_file(_file_id, _logger=None):
             return _FileRecord()
 
-        # Mock the handler's method directly (not the pipe's delegation method)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_get_file_by_id", fake_get_file)
+        monkeypatch.setattr(owui_files_module, "get_file_by_id", fake_get_file)
         block = {"type": "image_url", "image_url": {"url": "/api/v1/files/inline/content"}}
         image_block = await _transform_single_block(pipe_instance, block, mock_request, mock_user)
         assert image_block is not None
@@ -3373,15 +3366,16 @@ class TestImageTransformer:
         mock_user,
         monkeypatch,
     ):
-        """Missing OWUI file ids should not be sent upstream as internal URLs."""
+        """Missing required OWUI file ids must abort, never forwarding the internal URL."""
+        from open_webui_openrouter_pipe.core.errors import RequiredInternalFileError
 
-        async def fake_inline(_file_id, chunk_size, max_bytes):  # type: ignore[no-untyped-def]
+        async def fake_inline(_file_id, *, chunk_size, max_bytes, user=None):  # type: ignore[no-untyped-def]
             return None
 
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_inline_owui_file_id", fake_inline)
+        monkeypatch.setattr(pipe_instance._file_gateway, "inline_owui_file_id", fake_inline)
         block = {"type": "image_url", "image_url": {"url": "/api/v1/files/missing/content"}}
-        image_block = await _transform_single_block(pipe_instance, block, mock_request, mock_user)
-        assert image_block is None
+        with pytest.raises(RequiredInternalFileError):
+            await _transform_single_block(pipe_instance, block, mock_request, mock_user)
 
     @pytest.mark.asyncio
     async def test_image_error_returns_empty_block(
@@ -3393,7 +3387,7 @@ class TestImageTransformer:
     ):
         """Errors while processing images should not leak exceptions."""
         boom = RuntimeError("boom")
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", AsyncMock(side_effect=boom))
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", AsyncMock(side_effect=boom))
         block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
         image_block = await _transform_single_block(pipe_instance, block, mock_request, mock_user)
         assert image_block is not None
@@ -3433,7 +3427,7 @@ class TestFileTransformer:
         status_mock = AsyncMock()
 
         monkeypatch.setattr(pipe_instance._multimodal_handler, "_download_remote_url", download_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", upload_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", upload_mock)
         monkeypatch.setattr(pipe_instance._event_emitter_handler, "_emit_status", status_mock)
 
         events: list[dict] = []
@@ -3494,7 +3488,7 @@ class TestFileTransformer:
         status_mock = AsyncMock()
 
         monkeypatch.setattr(pipe_instance._multimodal_handler, "_download_remote_url", download_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", upload_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", upload_mock)
         monkeypatch.setattr(pipe_instance._event_emitter_handler, "_emit_status", status_mock)
 
         messages = [
@@ -3538,7 +3532,7 @@ class TestFileTransformer:
         notification_mock = AsyncMock()
 
         monkeypatch.setattr(pipe_instance._multimodal_handler, "_download_remote_url", download_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", upload_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", upload_mock)
         monkeypatch.setattr(pipe_instance._event_emitter_handler, "_emit_notification", notification_mock)
 
         async def event_emitter(_event: dict):
@@ -3588,7 +3582,7 @@ class TestFileTransformer:
         notification_mock = AsyncMock()
 
         monkeypatch.setattr(pipe_instance._multimodal_handler, "_download_remote_url", download_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", upload_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", upload_mock)
         monkeypatch.setattr(pipe_instance._event_emitter_handler, "_emit_notification", notification_mock)
 
         async def event_emitter(_event: dict):
@@ -3943,8 +3937,8 @@ class TestMultimodalIntegration:
         upload_mock = AsyncMock(side_effect=["img123", "file123"])
         inline_mock = AsyncMock(return_value=InlinedFile(data_url="data:image/png;base64,INLINE", filename="test.png"))
         monkeypatch.setattr(pipe_instance._multimodal_handler, "_download_remote_url", download_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", upload_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_inline_owui_file_id", inline_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", upload_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "inline_owui_file_id", inline_mock)
 
         messages = [
             {
@@ -3991,8 +3985,8 @@ class TestMultimodalIntegration:
         """Should handle message with text, audio, and image."""
         upload_mock = AsyncMock(return_value="img999")
         inline_mock = AsyncMock(return_value=InlinedFile(data_url="data:image/png;base64,INLINE", filename="test.png"))
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", upload_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_inline_owui_file_id", inline_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", upload_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "inline_owui_file_id", inline_mock)
 
         messages = [
             {
@@ -4034,8 +4028,8 @@ class TestMultimodalIntegration:
             InlinedFile(data_url="data:image/png;base64,img1", filename="test.png"),
             InlinedFile(data_url="data:image/png;base64,img2", filename="test.png"),
         ])
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", upload_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_inline_owui_file_id", inline_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", upload_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "inline_owui_file_id", inline_mock)
 
         messages = [
             {
@@ -4080,7 +4074,7 @@ class TestMultimodalIntegration:
         )
         upload_mock = AsyncMock(side_effect=[RuntimeError("boom"), "file-ok"])
         monkeypatch.setattr(pipe_instance._multimodal_handler, "_download_remote_url", download_mock)
-        monkeypatch.setattr(pipe_instance._multimodal_handler, "_upload_to_owui_storage", upload_mock)
+        monkeypatch.setattr(pipe_instance._file_gateway, "upload_to_owui_storage", upload_mock)
 
         messages = [
             {
@@ -4196,10 +4190,10 @@ class TestEnsureStorageUserCacheLock:
         cached_user = SimpleNamespace(id="cached-during-wait", email="cached@test.local")
 
         # Set the cache directly on the handler
-        pipe_instance_async._multimodal_handler._storage_user_cache = cached_user
+        pipe_instance_async._file_gateway._storage_user_cache = cached_user
 
         # Should return cached user without going to DB
-        result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+        result = await pipe_instance_async._file_gateway.ensure_storage_user()
         assert result is cached_user
 
 
@@ -4209,7 +4203,6 @@ class TestSignatureInspectionException:
     @pytest.mark.asyncio
     async def test_handles_type_error_in_signature_inspection(self, pipe_instance_async):
         """Should handle TypeError when inspecting insert signature."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
         import inspect
 
         created_user = SimpleNamespace(id="created-user", email="created@test.local")
@@ -4228,23 +4221,23 @@ class TestSignatureInspectionException:
                 raise TypeError("Cannot inspect this")
             return original_signature(fn)
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
         try:
             mock_users = Mock()
             mock_users.get_user_by_email = AsyncMock(return_value=None)
             mock_users.insert_new_user = bad_insert
-            multimodal_module.Users = mock_users
+            owui_files_module.Users = mock_users
 
-            pipe_instance_async._multimodal_handler._storage_user_cache = None
-            pipe_instance_async._multimodal_handler._user_insert_param_names = None
+            pipe_instance_async._file_gateway._storage_user_cache = None
+            pipe_instance_async._file_gateway._user_insert_param_names = None
 
             with patch.object(inspect, "signature", mock_signature):
-                result = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+                result = await pipe_instance_async._file_gateway.ensure_storage_user()
 
             # Should still create user even if signature inspection failed
             assert result is created_user
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
 
 class TestFetchImageSVGEdgeCases:
@@ -4381,27 +4374,26 @@ class TestEnsureStorageUserCacheInsideLock:
     @pytest.mark.asyncio
     async def test_concurrent_access_returns_cached_user(self, pipe_instance_async):
         """Should return cached user when second call finds cache set inside lock."""
-        import open_webui_openrouter_pipe.storage.multimodal as multimodal_module
         import asyncio
 
         existing_user = SimpleNamespace(id="existing-user", email="existing@test.local")
 
-        original_users = multimodal_module.Users
+        original_users = owui_files_module.Users
 
         try:
             mock_users = Mock()
             # Return an existing user (so no creation happens)
             mock_users.get_user_by_email = AsyncMock(return_value=existing_user)
 
-            multimodal_module.Users = mock_users
+            owui_files_module.Users = mock_users
 
             # Reset handler state
-            handler = pipe_instance_async._multimodal_handler
+            handler = pipe_instance_async._file_gateway
             handler._storage_user_cache = None
             handler._storage_user_lock = asyncio.Lock()
 
             # First call will populate the cache
-            result1 = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+            result1 = await pipe_instance_async._file_gateway.ensure_storage_user()
             assert result1 is existing_user
             assert handler._storage_user_cache is existing_user
 
@@ -4412,11 +4404,11 @@ class TestEnsureStorageUserCacheInsideLock:
             # Actually, line 760 can only be hit in a true race condition.
             # For testing purposes, we verify that once cache is set,
             # subsequent calls return the cached value (line 752-753)
-            result2 = await pipe_instance_async._multimodal_handler._ensure_storage_user()
+            result2 = await pipe_instance_async._file_gateway.ensure_storage_user()
             assert result2 is existing_user
 
         finally:
-            multimodal_module.Users = original_users
+            owui_files_module.Users = original_users
 
 
 # ─────────────────────────────────────────────────────────────────────────────
