@@ -415,17 +415,39 @@ def test_completions_body_image_config_via_extra_allow():
 # =============================================================================
 
 
-def test_gemini_pattern_matches_flash_image_preview_variants():
+def test_gemini_pattern_matches_flash_3x_image_only():
     from open_webui_openrouter_pipe.filters.filter_manager import FilterManager
 
     pat = FilterManager._GEMINI_IMAGE_PATTERN
+    assert pat.match("google/gemini-3.1-flash-image")
     assert pat.match("google/gemini-3.1-flash-image-preview")
-    # Forward-compat: future variants should match
-    assert pat.match("google/gemini-4.0-flash-image-preview")
     assert pat.match("google/gemini-3.5-flash-image-experimental-preview")
-    # Should NOT match: pro image, non-flash, non-preview
+    assert not pat.match("google/gemini-3-pro-image")
     assert not pat.match("google/gemini-3-pro-image-preview")
-    assert not pat.match("google/gemini-2.5-flash-image")  # no -preview
+    assert not pat.match("google/gemini-2.5-flash-image")
+    assert not pat.match("google/gemini-4.0-flash-image-preview")
+    assert not pat.match("google/gemini-3-pro")
+    assert not pat.match("google/gemini-2.5-flash")
+    assert not pat.match("openai/gpt-image-2")
+
+
+def test_image_filter_attach_and_runtime_patterns_are_in_sync():
+    from open_webui_openrouter_pipe.filters.filter_manager import FilterManager
+
+    cases = [
+        (render_gemini_image_filter_source, "gemini", "_GEMINI_MODEL_PATTERN", FilterManager._GEMINI_IMAGE_PATTERN),
+        (render_sourceful_image_filter_source, "sourceful", "_SOURCEFUL_MODEL_PATTERN", FilterManager._SOURCEFUL_IMAGE_PATTERN),
+        (render_sourceful_v25_image_filter_source, "sourceful_v25", "_SOURCEFUL_V25_MODEL_PATTERN", FilterManager._SOURCEFUL_V25_IMAGE_PATTERN),
+        (render_recraft_common_image_filter_source, "recraft", "_RECRAFT_MODEL_PATTERN", FilterManager._RECRAFT_COMMON_IMAGE_PATTERN),
+        (render_recraft_v3_image_filter_source, "recraft_v3", "_RECRAFT_V3_MODEL_PATTERN", FilterManager._RECRAFT_V3_IMAGE_PATTERN),
+        (render_grok_image_filter_source, "grok", "_GROK_IMAGINE_IMAGE_PATTERN", FilterManager._GROK_IMAGINE_IMAGE_PATTERN),
+    ]
+    for render_fn, variant, var_name, attach_pat in cases:
+        module = _load_filter_from_source(render_fn(), f"test_drift_guard_{variant}")
+        runtime_pat = getattr(module, var_name)
+        assert runtime_pat.pattern == attach_pat.pattern, (
+            f"{variant}: runtime gate {runtime_pat.pattern!r} != attach pattern {attach_pat.pattern!r}"
+        )
 
 
 def test_sourceful_pattern_matches_v2_pro_and_fast_only():
@@ -489,6 +511,21 @@ def test_mai_image_matches_no_family_pattern():
         assert not pat.match(model_id), f"{pat.pattern} unexpectedly claims {model_id}"
 
 
+def test_gpt_image_matches_no_family_pattern():
+    from open_webui_openrouter_pipe.filters.filter_manager import FilterManager
+
+    for model_id in ("openai/gpt-image-1", "openai/gpt-image-1-mini", "openai/gpt-image-2"):
+        for pat in (
+            FilterManager._GEMINI_IMAGE_PATTERN,
+            FilterManager._SOURCEFUL_IMAGE_PATTERN,
+            FilterManager._SOURCEFUL_V25_IMAGE_PATTERN,
+            FilterManager._RECRAFT_COMMON_IMAGE_PATTERN,
+            FilterManager._RECRAFT_V3_IMAGE_PATTERN,
+            FilterManager._GROK_IMAGINE_IMAGE_PATTERN,
+        ):
+            assert not pat.match(model_id), f"{pat.pattern} unexpectedly claims {model_id}"
+
+
 # =============================================================================
 # image_help.py: per-model entries
 # =============================================================================
@@ -533,18 +570,34 @@ def test_render_image_help_falls_back_to_catalog_for_unknown_model():
     assert "No curated help" in rendered
 
 
-def test_render_image_help_gemini_extended_knob_only_for_gemini_flash():
-    """Behaviour test: 'Image aspect ratio (Gemini extended)' knob description appears
-    only in help for Gemini Flash Image Preview models, not for other Gemini variants."""
+def test_render_image_help_gemini_extended_knob_only_for_flash_3x():
     gemini_flash = render_image_help(
         "google/gemini-3.1-flash-image-preview", IMAGE_BY_ID["google/gemini-3.1-flash-image-preview"]
     )
     assert "Image aspect ratio (Gemini extended)" in gemini_flash
 
+    gemini_pro = render_image_help(
+        "google/gemini-3-pro-image-preview", IMAGE_BY_ID["google/gemini-3-pro-image-preview"]
+    )
+    assert "Image aspect ratio (Gemini extended)" not in gemini_pro, (
+        "Pro does not advertise extended ratios — the extended knob must not appear in its help"
+    )
+
     gpt_image = render_image_help(
         "openai/gpt-5-image", IMAGE_BY_ID["openai/gpt-5-image"]
     )
     assert "Image aspect ratio (Gemini extended)" not in gpt_image
+
+
+def test_image_help_gemini_extended_gate_excludes_pro_and_2_5():
+    from open_webui_openrouter_pipe.integrations.image_help import _is_gemini_extended_ratio_model
+
+    assert _is_gemini_extended_ratio_model("google/gemini-3.1-flash-image")
+    assert _is_gemini_extended_ratio_model("google/gemini-3.1-flash-image-preview")
+    assert not _is_gemini_extended_ratio_model("google/gemini-3-pro-image")
+    assert not _is_gemini_extended_ratio_model("google/gemini-3-pro-image-preview")
+    assert not _is_gemini_extended_ratio_model("google/gemini-2.5-flash-image")
+    assert not _is_gemini_extended_ratio_model("openai/gpt-image-2")
 
 
 def test_render_image_help_sourceful_knobs_only_for_pro_and_fast():
@@ -681,6 +734,7 @@ def test_register_image_models_full_fixture_handles_all_entries():
             "recraft/recraft-v3",
             "recraft/recraft-v4",
             "recraft/recraft-v4-pro",
+            "openai/gpt-image-2",
         ]
     ]
     for norm_id in pure_image_norm_ids:
@@ -742,11 +796,11 @@ def test_sourceful_pattern_uses_fullmatch_anchors():
 
 
 def test_register_image_models_full_fixture_exact_pure_image_count():
-    """Exact-count assertion: register_image_models must add EXACTLY the 17
+    """Exact-count assertion: register_image_models must add EXACTLY the 18
     pure-image-only models from the fixture (7 Sourceful + 4 Flux + 1 Seedream
-    + 3 Recraft + 1 Microsoft MAI + 1 Grok Imagine), NOT any multimodal entries
-    (gpt-5-image variants, gemini-image variants, openrouter/auto — those land
-    in chat catalog separately).
+    + 3 Recraft + 1 Microsoft MAI + 1 Grok Imagine + 1 GPT Image), NOT any
+    multimodal entries (gpt-5-image variants, gemini-image variants,
+    openrouter/auto — those land in chat catalog separately).
     """
     OpenRouterModelRegistry._specs = {}
     OpenRouterModelRegistry._id_map = {}
@@ -758,8 +812,8 @@ def test_register_image_models_full_fixture_exact_pure_image_count():
         norm_id for norm_id, spec in OpenRouterModelRegistry._specs.items()
         if "image_output" in (spec.get("features") or set())
     ]
-    assert len(image_only_specs) == 17, (
-        f"Expected 17 pure-image-only registrations, got {len(image_only_specs)}: {image_only_specs}"
+    assert len(image_only_specs) == 18, (
+        f"Expected 18 pure-image-only registrations, got {len(image_only_specs)}: {image_only_specs}"
     )
 
 
@@ -808,25 +862,30 @@ def test_generic_filter_inlet_no_op_when_user_valves_empty():
     assert "image_config" not in body
 
 
-def test_gemini_filter_inlet_writes_extended_only_for_gemini_flash():
+def test_gemini_filter_inlet_writes_extended_for_flash_3x_not_pro():
     source = render_gemini_image_filter_source()
     module = _load_filter_from_source(source, "test_image_filter_gemini_runtime")
-    user_valves = module.Filter.UserValves(IMAGE_ASPECT_RATIO_EXTENDED="4:1", IMAGE_SIZE_GEMINI="0.5K")
 
-    # Gemini Flash Image Preview model — extended values written
-    gemini_body: dict[str, Any] = {
-        "model": "google/gemini-3.1-flash-image-preview",
-        "messages": [],
-    }
-    module.Filter().inlet(gemini_body, __metadata__={}, __user__={"valves": user_valves})
-    assert gemini_body["image_config"] == {"aspect_ratio": "4:1", "image_size": "0.5K"}
+    def applied(model_id: str) -> Any:
+        body: dict[str, Any] = {"model": model_id, "messages": []}
+        user_valves = module.Filter.UserValves(IMAGE_ASPECT_RATIO_EXTENDED="4:1", IMAGE_SIZE_GEMINI="0.5K")
+        module.Filter().inlet(body, __metadata__={}, __user__={"valves": user_valves})
+        return body.get("image_config")
 
-    # NON-Gemini model with the SAME user_valves — must be ignored (model gate)
-    non_gemini_body: dict[str, Any] = {"model": "openai/gpt-5-image", "messages": []}
-    module.Filter().inlet(non_gemini_body, __metadata__={}, __user__={"valves": user_valves})
-    assert "image_config" not in non_gemini_body, (
-        "Gemini filter must not modify body when model isn't Gemini Flash Image Preview"
-    )
+    for flash_id in ("google/gemini-3.1-flash-image", "google/gemini-3.1-flash-image-preview"):
+        assert applied(flash_id) == {"aspect_ratio": "4:1", "image_size": "0.5K"}, (
+            f"Flash 3.x {flash_id} must apply the extended ratio/0.5K"
+        )
+
+    for excluded_id in (
+        "google/gemini-3-pro-image",
+        "google/gemini-3-pro-image-preview",
+        "google/gemini-2.5-flash-image",
+        "openai/gpt-5-image",
+    ):
+        assert applied(excluded_id) is None, (
+            f"{excluded_id} must not get extended knobs"
+        )
 
 
 def test_sourceful_filter_inlet_writes_only_for_sourceful_pro_or_fast():
@@ -1185,6 +1244,89 @@ async def test_installer_dual_keys_no_aliasing():
     sanitized_ids.append("test-injection")
     assert "test-injection" not in original_ids, (
         "Aliasing detected: mutating sanitized_ids modified original_ids"
+    )
+
+
+@pytest.mark.asyncio
+async def test_installer_attaches_gemini_filter_to_flash_3x_not_pro():
+    from open_webui_openrouter_pipe.filters.filter_manager import FilterManager
+
+    OpenRouterModelRegistry._specs = {}
+    OpenRouterModelRegistry._id_map = {}
+    OpenRouterModelRegistry._models = []
+
+    architecture = {
+        "input_modalities": ["text", "image"],
+        "output_modalities": ["image", "text"],
+    }
+    derived_features = OpenRouterModelRegistry._derive_features(  # type: ignore[attr-defined]
+        supported_parameters={"temperature", "tools"},
+        architecture=architecture,
+        pricing={},
+    )
+    assert "image_output" in derived_features
+
+    flash_ids = {"google/gemini-3.1-flash-image", "google/gemini-3.1-flash-image-preview"}
+    pro_ids = {"google/gemini-3-pro-image", "google/gemini-3-pro-image-preview"}
+    models = []
+    for original_id in sorted(flash_ids | pro_ids):
+        sanitized = sanitize_model_id(original_id)
+        norm_id = ModelFamily.base_model(sanitized)
+        OpenRouterModelRegistry._specs[norm_id] = {
+            "features": set(derived_features),
+            "capabilities": {"image_generation": True},
+            "max_completion_tokens": None,
+            "supported_parameters": frozenset({"temperature", "tools"}),
+            "full_model": {"id": original_id, "architecture": architecture},
+            "architecture": architecture,
+        }
+        OpenRouterModelRegistry._id_map[norm_id] = original_id
+        models.append(
+            {"id": sanitized, "norm_id": norm_id, "original_id": original_id, "name": original_id}
+        )
+    ModelFamily.set_dynamic_specs(OpenRouterModelRegistry._specs)
+
+    pipe = MagicMock()
+    fm = FilterManager(pipe=pipe, valves=pipe.valves, logger=MagicMock())
+    fm._ensure_filter_installed = AsyncMock(side_effect=lambda **kwargs: kwargs["preferred_id"])
+
+    result = await fm.ensure_openrouter_image_filter_function_ids(models)
+
+    for model in models:
+        ids = result.get(model["id"]) or result.get(model["original_id"])
+        assert ids is not None, f"{model['original_id']} received no filter ids"
+        assert "openrouter_image_filter_generic" in ids
+        if model["original_id"] in flash_ids:
+            assert "openrouter_image_filter_gemini" in ids, (
+                f"Flash 3.x {model['original_id']} must auto-attach the gemini extended-ratio filter"
+            )
+        else:
+            assert "openrouter_image_filter_gemini" not in ids, (
+                f"Pro {model['original_id']} must NOT get the gemini filter — it lacks extended ratios"
+            )
+
+
+@pytest.mark.asyncio
+async def test_installer_attaches_generic_only_to_gpt_image():
+    from open_webui_openrouter_pipe.filters.filter_manager import FilterManager
+
+    OpenRouterModelRegistry._specs = {}
+    OpenRouterModelRegistry._id_map = {}
+    OpenRouterModelRegistry._models = []
+    OpenRouterModelRegistry.register_image_models(
+        [m for m in IMAGE_MODELS if m["id"] == "openai/gpt-image-2"]
+    )
+
+    pipe = MagicMock()
+    fm = FilterManager(pipe=pipe, valves=pipe.valves, logger=MagicMock())
+    fm._ensure_filter_installed = AsyncMock(side_effect=lambda **kwargs: kwargs["preferred_id"])
+
+    gpt_image = OpenRouterModelRegistry.list_models()[0]
+    result = await fm.ensure_openrouter_image_filter_function_ids([gpt_image])
+
+    ids = result.get(gpt_image["id"])
+    assert ids == ["openrouter_image_filter_generic"], (
+        f"gpt-image must auto-attach generic-only, got {ids}"
     )
 
 

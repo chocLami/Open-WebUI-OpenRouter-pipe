@@ -4,6 +4,58 @@ from typing import Any
 
 
 _PER_MODEL_HELP_DATA: dict[str, dict[str, Any]] = {
+    "alibaba/happyhorse-1.1": {
+        "display_name": "Alibaba: HappyHorse 1.1",
+        "best_known_for": (
+            "Alibaba's HappyHorse 1.1 text- and image-to-video model. It generates 3-to-15-second "
+            "clips at 720p or 1080p and stands out for an unusually wide aspect-ratio range — the usual "
+            "16:9 / 9:16 / 1:1 / 4:3 / 3:4 plus ultrawide 21:9 and tall 9:21 — which makes it a fit for "
+            "cinematic letterbox shots and full-bleed vertical formats that the 8-second-capped models "
+            "can't cover in one clip. It supports first-frame image conditioning and a seed for "
+            "reproducible runs, and does not generate audio. 1.1 refines 1.0 with the same controls at a "
+            "lower 1080p price."
+        ),
+        "tips_and_pitfalls": [
+            "Front-load one clear shot — subject, action, setting, camera move, and style in plain prose; one idea per clip holds together far better than crowded multi-subject scenes.",
+            "Use a first-frame image to lock the opening composition and identity, then describe only the motion that follows, not the still itself.",
+            "Longer durations (10-15s) tax motion and identity consistency harder — reuse a seed when iterating prompt tweaks so the clip doesn't drift between runs.",
+            "No audio is generated — don't spend prompt tokens describing sound; add music and SFX in post.",
+        ],
+        "knob_descriptions": {
+            "Duration": "Clip length in seconds (3-15); longer clips cost proportionally more and are harder to keep consistent.",
+            "Aspect ratio": "Framing from a wide set — 16:9 / 9:16 / 1:1 / 4:3 / 3:4 plus ultrawide 21:9 and tall 9:21.",
+            "Resolution": "720p (cheapest) or 1080p output tier, which drives the price SKU.",
+            "Size": "Pins exact pixel dimensions (e.g. 1920x1080, 1080x1920, 2520x1080) instead of letting aspect ratio + resolution decide.",
+            "Frames": "First-frame image conditioning — auto/none for pure text-to-video, or first_only to animate from a supplied starting still.",
+            "Seed": "Integer for reproducible regeneration — same prompt + seed yields a near-identical clip when iterating.",
+            "Provider options JSON": "Escape hatch for raw provider parameters not exposed by the typed valves above.",
+        },
+    },
+    "alibaba/happyhorse-1.0": {
+        "display_name": "Alibaba: HappyHorse 1.0",
+        "best_known_for": (
+            "Alibaba's first HappyHorse video model — text- and image-to-video with the same wide "
+            "aspect-ratio range (including ultrawide 21:9 and tall 9:21), 3-to-15-second clips at 720p or "
+            "1080p, first-frame conditioning, and seed control, with no audio. Largely superseded by "
+            "HappyHorse 1.1, which prices 1080p lower for the same controls; reach for 1.0 only when you "
+            "need to pin the exact 1.0 generation behaviour."
+        ),
+        "tips_and_pitfalls": [
+            "Prefer HappyHorse 1.1 for new work — it matches 1.0's controls and resolutions at a lower 1080p price.",
+            "Front-load a single clear shot in plain prose and keep to one idea per clip; multi-subject action remains a weak spot.",
+            "Anchor the opening with a first-frame image and reuse a seed across iterations to keep identity stable.",
+            "No audio is generated — describe only the visuals and add sound in post.",
+        ],
+        "knob_descriptions": {
+            "Duration": "Clip length in seconds (3-15); longer clips cost more and strain consistency.",
+            "Aspect ratio": "16:9 / 9:16 / 1:1 / 4:3 / 3:4 plus ultrawide 21:9 and tall 9:21.",
+            "Resolution": "720p or 1080p output tier (drives the price SKU).",
+            "Size": "Exact pixel dimensions when you need a specific canvas rather than a ratio+resolution pair.",
+            "Frames": "First-frame conditioning — none for text-to-video or first_only to animate from a starting still.",
+            "Seed": "Integer seed for reproducible regeneration across prompt iterations.",
+            "Provider options JSON": "Raw escape hatch for provider parameters the typed valves don't expose.",
+        },
+    },
     "google/veo-3.1-fast": {
         "display_name": "Google: Veo 3.1 Fast",
         "best_known_for": (

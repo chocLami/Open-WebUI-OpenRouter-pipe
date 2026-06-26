@@ -55,7 +55,7 @@ will be removed from the dropdown immediately.
 3. (Optional) Open the Integrations menu (puzzle-piece icon below the
    prompt input). The `OR Image Filter` toggle is auto-attached and
    default-on. Model families with extra parameters also get their own
-   filter rows: `Gemini Options` (Gemini Flash Image Preview),
+   filter rows: `Gemini Options` (Gemini Flash 3.x image),
    `Sourceful Options` (Riverflow V2 Pro/Fast), `Sourceful V2.5
    Options` (Riverflow 2.5 Pro/Fast — the single Sourceful filter for
    2.5, carrying fonts plus the 2.5-only knobs), `Recraft Options`
@@ -188,7 +188,7 @@ Pick model selection rules of thumb:
 - **Vector (SVG) output for logos/icons** → Recraft V4/V4.1 Vector
   variants (true `<svg>`, scales infinitely).
 - **Ultrawide / ultratall layouts (4:1, 1:4, 8:1, 1:8)** → Gemini 3.1
-  Flash Image Preview (only model with extended aspect ratios).
+  Flash Image — GA or preview (only line with extended aspect ratios).
 - **Tall phone-screen ratios (9:19.5, 9:20) or auto-ratio** → xAI Grok
   Imagine Image Quality (14-value Grok ratio set).
 - **Multiple variations per request** → Grok Imagine Image Quality
@@ -346,7 +346,7 @@ prompt-following tasks with cinematic composition and natural-looking
 output. Outputs both text and image.
 
 - Standard 10 aspect ratios + 1K/2K/4K. **No 0.5K or extended ratios on
-  this variant** — those are Gemini 3.1 Flash Image Preview only.
+  this variant** — those are Gemini 3.x Flash Image only.
 - Multimodal: model decides emission based on prompt; be explicit.
 - Strong at photoreal scenes and prompt-faithful composition.
 
@@ -799,10 +799,10 @@ This section enumerates exactly which filter knobs each model exposes.
 | Image aspect ratio | Literal | `""`, `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9` | `""` = model default. |
 | Image size | Literal | `""`, `1K`, `2K`, `4K` | `""` = model default (1K). |
 
-### Gemini Flash Image Preview only (Gemini Options filter)
+### Gemini Flash 3.x image only (Gemini Options filter)
 
 Adds 4 extra aspect ratios + a 0.5K size tier. Only attached to models
-matching `^google/gemini-.*flash-image.*-preview$`.
+matching `^google/gemini-3.*flash-image.*$`.
 
 | Knob | Type | Values | Notes |
 |------|------|--------|-------|
@@ -892,7 +892,7 @@ treated as "leave model default" (skipped from the request).
 | `IMAGE_ASPECT_RATIO` | `Literal["", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]` | `""` | `image_config.aspect_ratio` |
 | `IMAGE_SIZE` | `Literal["", "1K", "2K", "4K"]` | `""` | `image_config.image_size` |
 
-### Gemini Options filter (Gemini Flash Image Preview only)
+### Gemini Options filter (Gemini Flash 3.x image only)
 
 | Identifier | Type | Default | Maps to body field |
 |------------|------|---------|---------------------|
@@ -1069,7 +1069,7 @@ generation where you want commentary alongside the visual.
 ```
 
 The `## Knobs` section is gated on the model — the Gemini Options
-knobs only render for Gemini Flash Image Preview models, the Sourceful
+knobs only render for Gemini Flash 3.x image models, the Sourceful
 Options knobs only render for Riverflow Pro/Fast.
 
 If a model isn't in the curated dataset (newly added by OpenRouter
@@ -1230,7 +1230,7 @@ protecting against operator misconfiguration. To use the knobs, you
 must be on the matching Riverflow version (Pro or Fast).
 
 Same applies to `Gemini Options` — only fires for
-`^google/gemini-.*flash-image.*-preview$`.
+`^google/gemini-3.*flash-image.*$`.
 
 ### `font_inputs has 3 entries; max is 2.`
 
@@ -1302,7 +1302,7 @@ pipes()
   └─ if AUTO_INSTALL_IMAGE_FILTERS:
         ensure_openrouter_image_filter_function_ids(available_models)
           ├─ install generic filter (always, lazily)
-          ├─ install Gemini Options filter (if any Gemini Flash Image Preview model)
+          ├─ install Gemini Options filter (if any Gemini Flash 3.x image model)
           ├─ install Sourceful Options filter (if any Sourceful Pro/Fast model)
           └─ each install in own try/except — partial failures isolated
 

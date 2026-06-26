@@ -1340,6 +1340,20 @@ def test_video_filter_spec_seed_and_audio_gates_use_top_level_fields():
     assert sora.audio_capable is True
 
 
+def test_happyhorse_video_filter_spec_covers_wide_ratios_seed_no_audio():
+    for model_id in ("alibaba/happyhorse-1.0", "alibaba/happyhorse-1.1"):
+        spec = build_video_filter_spec(model_id, VIDEO_BY_ID[model_id])
+        assert set(spec.aspect_ratios) == {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "9:21"}
+        assert "21:9" in spec.aspect_ratios
+        assert "9:21" in spec.aspect_ratios
+        assert set(spec.durations) == set(range(3, 16))
+        assert set(spec.resolutions) == {"720p", "1080p"}
+        assert spec.frame_types == ("first_frame",)
+        assert spec.seed_capable is True
+        assert spec.audio_capable is False
+        assert spec.allowed_params == ()
+
+
 @pytest.mark.parametrize("model_id", list(_VIDEO_MODEL_IDS_FOR_AUDIT := [
     "google/veo-3.1-fast",
     "google/veo-3.1-lite",
@@ -1354,6 +1368,8 @@ def test_video_filter_spec_seed_and_audio_gates_use_top_level_fields():
     "alibaba/wan-2.6",
     "bytedance/seedance-1-5-pro",
     "openai/sora-2-pro",
+    "alibaba/happyhorse-1.0",
+    "alibaba/happyhorse-1.1",
 ]))
 def test_video_filter_renderer_per_model_audit(model_id: str):
     model = VIDEO_BY_ID[model_id]

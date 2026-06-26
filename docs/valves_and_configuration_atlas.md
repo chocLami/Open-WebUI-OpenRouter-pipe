@@ -181,8 +181,8 @@ Image-output models (Sourceful Riverflow, Black Forest Labs FLUX, ByteDance Seed
 | Valve | Type | Default (verified) | Purpose / notes |
 | --- | --- | --- | --- |
 | `ENABLE_OPENROUTER_IMAGE_GENERATION` | `bool` | `True` | Expose OpenRouter native image-output models as chat models. Pure-image-only models (FLUX, Riverflow, Seedream) are discovered via `/api/v1/models?output_modalities=image`. Multimodal text+image models (gpt-5-image, gemini-image variants) stay in the chat catalog and get the generic image filter attached for `image_config` knobs. Setting this to `False` calls `register_image_models([])` and `reset_image_fetch_timestamp()` so pure-image-only models vanish from OWUI's dropdown immediately. |
-| `AUTO_INSTALL_IMAGE_FILTERS` | `bool` | `True` | Automatically install/update the OpenRouter native image filters in Open WebUI: `OR Image Filter` (generic, all image models), `Gemini Options` (Gemini Flash Image Preview only), `Sourceful Options` (Riverflow V2 Pro/Fast only), `Sourceful V2.5 Options` (Riverflow 2.5 Pro/Fast only — the single Sourceful filter for 2.5), `Recraft Options` (all Recraft models), `Recraft V3 Extras` (Recraft V3 only), `Grok Imagine Options` (Grok Imagine image models only). |
-| `AUTO_ATTACH_IMAGE_FILTERS` | `bool` | `True` | Automatically attach the appropriate native image filters to image-output models: generic to all, Gemini-extended to `^google/gemini-.*flash-image.*-preview$`, Sourceful to `^sourceful/riverflow-v2-(pro\|fast)$`, Sourceful V2.5 to `^sourceful/riverflow-v2\.5-(pro\|fast)$` (one Sourceful filter per Riverflow version), Recraft to `^recraft/recraft-`, Recraft V3 Extras to `recraft/recraft-v3` exactly, Grok Imagine to `^x-ai/grok-imagine-image-`. |
+| `AUTO_INSTALL_IMAGE_FILTERS` | `bool` | `True` | Automatically install/update the OpenRouter native image filters in Open WebUI: `OR Image Filter` (generic, all image models), `Gemini Options` (Gemini Flash 3.x image only), `Sourceful Options` (Riverflow V2 Pro/Fast only), `Sourceful V2.5 Options` (Riverflow 2.5 Pro/Fast only — the single Sourceful filter for 2.5), `Recraft Options` (all Recraft models), `Recraft V3 Extras` (Recraft V3 only), `Grok Imagine Options` (Grok Imagine image models only). |
+| `AUTO_ATTACH_IMAGE_FILTERS` | `bool` | `True` | Automatically attach the appropriate native image filters to image-output models: generic to all, Gemini-extended to `^google/gemini-3.*flash-image.*$`, Sourceful to `^sourceful/riverflow-v2-(pro\|fast)$`, Sourceful V2.5 to `^sourceful/riverflow-v2\.5-(pro\|fast)$` (one Sourceful filter per Riverflow version), Recraft to `^recraft/recraft-`, Recraft V3 Extras to `recraft/recraft-v3` exactly, Grok Imagine to `^x-ai/grok-imagine-image-`. |
 | `AUTO_DEFAULT_IMAGE_FILTERS` | `bool` | `True` | Always keep the attached image filters enabled by default on image-output models. Re-asserted on every catalog metadata sync. Setting this to `False` suppresses auto-default but does not detach already-defaulted filters; see `_apply_image_default_filter_ids` in `models/catalog_manager.py`. |
 
 Notes:
@@ -201,7 +201,7 @@ Three filter functions are installed:
 | Filter ID | OWUI display name | Attached to |
 | --- | --- | --- |
 | `openrouter_image_filter_generic` | `OR Image Filter` | All image models |
-| `openrouter_image_filter_gemini` | `Gemini Options` | Gemini Flash Image Preview models |
+| `openrouter_image_filter_gemini` | `Gemini Options` | Gemini Flash 3.x image models |
 | `openrouter_image_filter_sourceful` | `Sourceful Options` | Sourceful Riverflow Pro/Fast models |
 | `openrouter_image_filter_recraft` | `Recraft Options` | All Recraft models (V3, V4, V4 Pro) |
 | `openrouter_image_filter_recraft_v3` | `Recraft V3 Extras` | Recraft V3 only |
@@ -213,7 +213,7 @@ Three filter functions are installed:
 | `IMAGE_ASPECT_RATIO` | `Literal["", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]` | `""` | `image_config.aspect_ratio` |
 | `IMAGE_SIZE` | `Literal["", "1K", "2K", "4K"]` | `""` | `image_config.image_size` |
 
-**Gemini Options filter UserValves** (Gemini Flash Image Preview only):
+**Gemini Options filter UserValves** (Gemini Flash 3.x image only):
 
 | Valve | Type | Default | Maps to |
 | --- | --- | --- | --- |

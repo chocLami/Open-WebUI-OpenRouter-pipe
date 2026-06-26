@@ -10,7 +10,7 @@ runtime registry access.
 
 Filter assignment rules (driven by `filter_manager.ensure_openrouter_image_filter_function_ids`):
 - **All** models with `image` in `output_modalities` get the **generic** filter
-- Models matching `^google/gemini-.*flash-image.*-preview$` ALSO get **gemini** filter (extended aspect ratios + 0.5K)
+- Models matching `^google/gemini-3.*flash-image.*$` ALSO get **gemini** filter (extended aspect ratios + 0.5K — Flash 3.x only)
 - Models matching `^sourceful/riverflow-v2-(pro|fast)$` ALSO get **sourceful** filter
   (font_inputs + super_resolution_references — Riverflow V2 only)
 - Models matching `^sourceful/riverflow-v2\\.5-(pro|fast)$` ALSO get **sourceful_v25** filter
@@ -222,7 +222,7 @@ class Filter:
 def render_gemini_image_filter_source() -> str:
     """Render the Gemini-specific image filter — extended aspect ratios + 0.5K size.
 
-    Attached only to models matching `^google/gemini-.*flash-image.*-preview$`.
+    Attached only to models matching `^google/gemini-3.*flash-image.*$` (Flash 3.x).
     Shallow-merges into body.image_config alongside the generic filter (per-key
     overwrite; if both filters write the same key, the second one wins).
     """
@@ -246,7 +246,7 @@ except Exception:  # pragma: no cover
 OWUI_OPENROUTER_PIPE_MARKER = "{spec.marker}"
 IMAGE_FILTER_VARIANT = "{spec.variant}"
 
-_GEMINI_MODEL_PATTERN = re.compile(r"^google/gemini-.*flash-image.*-preview$")
+_GEMINI_MODEL_PATTERN = re.compile(r"^google/gemini-3.*flash-image.*$")
 
 
 def _canonical_model_slug(raw: str) -> str:
@@ -291,9 +291,6 @@ class Filter:
     ) -> dict:
         if not isinstance(body, dict):
             return body
-        # Model gate: don't emit Gemini-specific knobs unless the model is a
-        # Gemini Flash Image Preview variant. Defends against operator misconfiguration
-        # (filter manually attached to non-Gemini model would otherwise send invalid params).
         model_id = body.get("model") or ""
         if not isinstance(model_id, str) or not _GEMINI_MODEL_PATTERN.match(_canonical_model_slug(model_id)):
             return body

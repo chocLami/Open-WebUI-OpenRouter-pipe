@@ -1619,7 +1619,7 @@ class Valves(BaseModel):
         description=(
             "Automatically attach the appropriate native image filters to "
             "image-output models: generic to all, Gemini-extended to Gemini "
-            "Flash Image Preview, Sourceful-extended to Riverflow Pro/Fast."
+            "Flash 3.x image, Sourceful-extended to Riverflow Pro/Fast."
         ),
     )
     AUTO_DEFAULT_IMAGE_FILTERS: bool = Field(

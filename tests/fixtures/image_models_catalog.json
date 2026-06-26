@@ -1214,6 +1214,60 @@
       "links": {
         "details": "/api/v1/models/x-ai/grok-imagine-image-quality-20260512/endpoints"
       }
+    },
+    {
+      "id": "openai/gpt-image-2",
+      "canonical_slug": "openai/gpt-image-2",
+      "hugging_face_id": null,
+      "name": "OpenAI: GPT Image 2",
+      "created": 1782264714,
+      "description": "OpenAI's latest image generation model. Supports high-fidelity image generation and editing via the dedicated Images API.",
+      "context_length": 400000,
+      "architecture": {
+        "modality": "text+image->image",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "image"
+        ],
+        "tokenizer": "GPT",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000008",
+        "completion": "0.000008",
+        "web_search": "0.01",
+        "input_cache_read": "0.000002"
+      },
+      "top_provider": {
+        "context_length": 400000,
+        "max_completion_tokens": null,
+        "is_moderated": true
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "frequency_penalty",
+        "logit_bias",
+        "logprobs",
+        "max_tokens",
+        "presence_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "top_logprobs",
+        "top_p"
+      ],
+      "default_parameters": {},
+      "supported_voices": null,
+      "knowledge_cutoff": null,
+      "expiration_date": null,
+      "links": {
+        "details": "/api/v1/models/openai/gpt-image-2/endpoints"
+      }
     }
   ]
 }

@@ -1041,7 +1041,7 @@ class Filter:
     # =========================================================================
     #
 
-    _GEMINI_IMAGE_PATTERN = re.compile(r"^google/gemini-.*flash-image.*-preview$")
+    _GEMINI_IMAGE_PATTERN = re.compile(r"^google/gemini-3.*flash-image.*$")
     # Each Riverflow version gets exactly ONE Sourceful filter (never stacked):
     # V2 Pro/Fast -> sourceful (fonts + super-res); 2.5 Pro/Fast -> sourceful_v25
     # (fonts + scoring + background — 2.5 dropped super-res).

@@ -79,7 +79,7 @@ _IMAGE_PER_MODEL_HELP_DATA: dict[str, dict[str, Any]] = {
             "looking output. Outputs both text and image."
         ),
         "tips_and_pitfalls": [
-            "Standard 10 aspect ratios + 1K/2K/4K. No 0.5K or extended ratios on this variant — those are Gemini 3.1 Flash Image Preview only.",
+            "Standard 10 aspect ratios + 1K/2K/4K. No 0.5K or extended ratios on this variant — those are Gemini 3.x Flash Image only (GA + preview).",
             "Multimodal: model decides emission based on prompt; be explicit.",
             "Strong at photoreal scenes and prompt-faithful composition.",
         ],
@@ -111,10 +111,10 @@ _IMAGE_PER_MODEL_HELP_DATA: dict[str, dict[str, Any]] = {
             "Cost-optimized Gemini 3.1 with native image output AND unique "
             "extended knobs: 4 extra aspect ratios (1:4, 4:1, 1:8, 8:1) for "
             "ultrawide/tall layouts AND a 0.5K low-res tier for cheap "
-            "iteration. Only Gemini variant with these extensions."
+            "iteration. The Gemini 3.x Flash Image line (GA + preview) has these; Pro and 2.5 do not."
         ),
         "tips_and_pitfalls": [
-            "Use the dedicated 'Gemini Options' filter for extended ratios (4:1, 1:4, 8:1, 1:8) and 0.5K size — these are Gemini Flash Image Preview ONLY.",
+            "Use the dedicated 'Gemini Options' filter for extended ratios (4:1, 1:4, 8:1, 1:8) and 0.5K size — these are Gemini 3.x Flash Image ONLY (GA + preview; not Pro or 2.5).",
             "Set aspect via the Gemini-extended valve OR the standard valve; the Gemini one wins on collision (deep-merge semantics).",
             "0.5K is ~50% cheaper than 1K — good for prompt iteration.",
         ],
@@ -729,10 +729,10 @@ _IMAGE_KNOB_GATE: dict[str, str | None] = {
 }
 
 
-def _is_gemini_flash_image_preview(model_id: str) -> bool:
-    """Match models eligible for Gemini-extended knobs."""
+def _is_gemini_extended_ratio_model(model_id: str) -> bool:
+    """Match models eligible for Gemini-extended knobs (Flash 3.x — not Pro or 2.5)."""
     import re
-    return bool(re.match(r"^google/gemini-.*flash-image.*-preview$", model_id or ""))
+    return bool(re.match(r"^google/gemini-3.*flash-image.*$", model_id or ""))
 
 
 def _is_sourceful_pro_or_fast(model_id: str) -> bool:
@@ -775,7 +775,7 @@ def _image_knob_is_active(knob: str, model_id: str) -> bool:
     if gate is None:
         return True
     if gate == "gemini_extended":
-        return _is_gemini_flash_image_preview(model_id)
+        return _is_gemini_extended_ratio_model(model_id)
     if gate == "sourceful_extended":
         return _is_sourceful_pro_or_fast(model_id)
     if gate == "sourceful_v2_superres":
