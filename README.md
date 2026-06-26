@@ -4,9 +4,9 @@
 [![Version](https://img.shields.io/badge/version-2.6.6-blue.svg)](https://github.com/rbb-dev/Open-WebUI-OpenRouter-pipe)
 [![Open WebUI Compatible](https://img.shields.io/badge/Open%20WebUI-0.9.1%2B-green.svg)](https://openwebui.com/)
 
-**390+ AI models. Chat, image, and video — all from your Open WebUI.**
+**360+ AI models. Chat, image, video, and live multi-model Fusion — all from your Open WebUI.**
 
-GPT-5.5, Gemini 3, Claude Opus, Llama 4, FLUX.2, Sora 2, Veo 3.1, Kling, Wan, Riverflow — text, images, and video generation through OpenRouter's unified API. One key, one bill, every model that matters.
+GPT-5.5, Gemini 3, Claude Opus, Llama 4, FLUX.2, Sora 2, Veo 3.1, Kling, Wan, Riverflow — text, images, and video generation through OpenRouter's unified API, plus OpenRouter Fusion's live multi-model deliberation. One key, one bill, every model that matters.
 
 <p align="center">
   <img width="49%" alt="chat" src="https://github.com/user-attachments/assets/c937443b-f1be-4091-9555-b49789f16a97" />
@@ -21,6 +21,7 @@ GPT-5.5, Gemini 3, Claude Opus, Llama 4, FLUX.2, Sora 2, Veo 3.1, Kling, Wan, Ri
 * **Multimodal-aware routing adapters** — inspects the payload (text + images/files/audio/video) and picks the endpoint and format the target model supports.
 * **Responses-first endpoint routing** — builds canonical requests and routes between `/responses` and `/chat/completions` based on model rules, fallbacks, or attachments.
 * **Native image and video generation** — exposed as regular chat models with per-model knobs.
+* **OpenRouter Fusion** — multi-model deliberation (a panel of models + a judge) rendered as a live, theme-aware in-chat panel.
 * **OpenRouter server tools** — `web_search`, `web_fetch`, and `datetime` behind one OWUI filter.
 * **Operator controls via valves** — routing, limits, storage, security, telemetry, and templates.
 
@@ -29,13 +30,16 @@ GPT-5.5, Gemini 3, Claude Opus, Llama 4, FLUX.2, Sora 2, Veo 3.1, Kling, Wan, Ri
 ## What You Get
 
 🎯 **Every Model, One Place**
-350+ chat models, 14 video models, 31 image-output models. All variants (`:nitro`, `:thinking`, `:exacto`, `:free`) and OpenRouter presets (`@preset/...`).
+330+ chat models, 16 video models, 37 image-output models. All variants (`:nitro`, `:thinking`, `:exacto`, `:free`) and OpenRouter presets (`@preset/...`).
 
 🎨 **Image Generation, Inline**
-31 image models — Recraft, Sourceful Riverflow, Black Forest Labs FLUX.2, ByteDance Seedream, Gemini Image, GPT-5 Image, xAI Grok Imagine, Microsoft MAI. Type a prompt, get an image. Custom fonts, transparent backgrounds, and Gemini's ultrawide aspect ratios all exposed as one-click filters.
+37 image models — Recraft, Sourceful Riverflow, Black Forest Labs FLUX.2, ByteDance Seedream, Gemini Image, GPT-5 Image, xAI Grok Imagine, Microsoft MAI. Type a prompt, get an image. Custom fonts, transparent backgrounds, and Gemini's ultrawide aspect ratios all exposed as one-click filters.
 
 🎬 **Video Generation**
-14 video models — Veo 3.1, Sora 2 Pro, Kling, Wan, Hailuo, Seedance, xAI Grok Imagine. Type a prompt, get a video that plays inline. Per-model knobs (duration, aspect ratio, resolution, audio, frames, negative prompt) all exposed as one-click filters.
+16 video models — Veo 3.1, Sora 2 Pro, Kling, Wan, Hailuo, Seedance, xAI Grok Imagine. Type a prompt, get a video that plays inline. Per-model knobs (duration, aspect ratio, resolution, audio, frames, negative prompt) all exposed as one-click filters.
+
+🧬 **Fusion — Many Models, One Answer, Live**
+Ask once; OpenRouter Fusion runs a *panel* of up to 8 models in parallel, a *judge* model weighs their answers — consensus, disagreements, gaps, blind spots — and writes the final answer from that analysis. The pipe renders the whole deliberation as a **live, theme-aware panel** in the chat: the intent, each model's answer, the judge's breakdown, and the final answer streaming in. One toggle on the `openrouter/fusion` model.
 
 🖼️ **Multimodal That Actually Works**
 Drop in images, PDFs, audio, video. The pipe figures out what each model supports — `/responses` vs `/chat/completions`, file vs RAG, streaming vs not.
@@ -53,8 +57,9 @@ Model icons + descriptions + capabilities sync automatically. Per-chat cost disp
 
 ## What's New
 
-- **Native image generation** — 31 image-output models (Sourceful, FLUX, Seedream, Gemini Image, GPT-5 Image, Recraft, xAI Grok Imagine, Microsoft MAI) with 7 per-family filters (generic, Gemini Options, Sourceful Options, Sourceful V2.5 Options, Recraft Options, Recraft V3 Extras, Grok Imagine Options).
-- **Video generation** — 14 OpenRouter video models with per-model filters and inline `<video>` rendering.
+- **OpenRouter Fusion** — multi-model deliberation (a panel of up to 8 models + a judge) rendered as a **live, theme-aware HTML panel** that streams the intent, per-model answers, judge analysis, and final answer in-chat. Preset / panel / judge / max-tool-calls knobs via the filter.
+- **Native image generation** — 37 image-output models (Sourceful, FLUX, Seedream, Gemini Image, GPT-5 Image, Recraft, xAI Grok Imagine, Microsoft MAI) with 7 per-family filters (generic, Gemini Options, Sourceful Options, Sourceful V2.5 Options, Recraft Options, Recraft V3 Extras, Grok Imagine Options).
+- **Video generation** — 16 OpenRouter video models with per-model filters and inline `<video>` rendering.
 - **OpenRouter Web Tools** — Web Search + Web Fetch + Datetime as one toggleable filter; tool execution cards with citations.
 - **Open WebUI 0.9.x compatibility** — fully migrated to the async DB stack.
 - **Provider routing filters** — admin + user-controlled routing, fallbacks, ZDR, sort order.
@@ -65,7 +70,7 @@ Model icons + descriptions + capabilities sync automatically. Per-chat cost disp
 ## For IT & Operations
 
 ⚡ **Production Hardened**
-Rate limiting, circuit breakers, request admission, graceful degradation. 3800+ pytest tests, both readable and compressed bundle variants.
+Rate limiting, circuit breakers, request admission, graceful degradation. 4100+ pytest tests, both readable and compressed bundle variants.
 
 🔐 **Security First**
 Encrypted credential storage. SSRF protection with HTTPS-only remote fetches by default. No secrets in logs. Capability-gated filter attach (image and video models cannot accidentally enable tools they don't support).
@@ -158,6 +163,7 @@ Every document in [`docs/`](docs/README.md):
 - [Valves & Configuration Atlas](docs/valves_and_configuration_atlas.md) — every valve, verified defaults
 - [Image Generation](docs/openrouter_image_generation.md) — models, filters, per-model knobs
 - [Video Generation](docs/openrouter_video_generation.md) — models, async lifecycle, resume behaviour
+- [OpenRouter Fusion](docs/openrouter_fusion.md) — multi-model deliberation + the live panel
 - [Server Tools](docs/openrouter_server_tools.md) — Web Search, Web Fetch, Datetime, legacy Image Gen
 - [Direct Uploads](docs/openrouter_direct_uploads.md) — bypass OWUI RAG, forward as `input_file`
 - [Provider Routing](docs/openrouter_provider_routing.md) — admin + user routing filters
