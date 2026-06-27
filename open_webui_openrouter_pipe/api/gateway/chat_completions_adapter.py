@@ -470,13 +470,13 @@ class ChatCompletionsAdapter:
                                             images_emitted = True
 
                                 if annotations:
-                                    for url, title in _parse_url_citation_annotations(annotations):
+                                    for url, title, content in _parse_url_citation_annotations(annotations):
                                         if url in seen_citation_urls:
                                             continue
                                         seen_citation_urls.add(url)
                                         yield {
                                             "type": "response.output_text.annotation.added",
-                                            "annotation": {"type": "url_citation", "url": url, "title": title},
+                                            "annotation": {"type": "url_citation", "url": url, "title": title, "content": content},
                                         }
 
                                 content_delta = delta_obj.get("content")

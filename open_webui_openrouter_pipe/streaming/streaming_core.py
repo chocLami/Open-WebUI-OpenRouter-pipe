@@ -517,7 +517,7 @@ class StreamingHandler:
         reasoning_stream_completed: set[str] = set()
         ordinal_by_url: dict[str, int] = {}
         emitted_citations: list[dict] = []
-        annotation_citations_emitted = False
+        citation_excerpt_max = 1000
         chat_id = metadata.get("chat_id")
         message_id = metadata.get("message_id")
         model_started = asyncio.Event()
@@ -1057,20 +1057,19 @@ class StreamingHandler:
             return ""
 
         async def _emit_annotation_citations(raw_annotations: Any) -> None:
-            """Emit citations from a final annotation dump if no stream citations were seen."""
-            nonlocal annotation_citations_emitted
-            if annotation_citations_emitted:
-                return
+            """Emit url_citation citations, skipping any URL already emitted (per-URL dedup)."""
             if not isinstance(raw_annotations, list) or not raw_annotations:
                 return
-            emitted_any = False
-            for url, title in _parse_url_citation_annotations(raw_annotations):
+            for url, title, content in _parse_url_citation_annotations(raw_annotations):
                 if url.endswith("?utm_source=openai"):
                     url = url[: -len("?utm_source=openai")]
+                if url in ordinal_by_url:
+                    continue
+                ordinal_by_url[url] = len(ordinal_by_url) + 1
                 host = _citation_host(url)
                 citation = {
                     "source": {"name": host or "source", "url": url},
-                    "document": [title],
+                    "document": [content[:citation_excerpt_max] if content else title],
                     "metadata": [{
                         "source": url,
                         "date_accessed": datetime.date.today().isoformat(),
@@ -1081,9 +1080,6 @@ class StreamingHandler:
                 except Exception as exc:
                     self.logger.debug("Failed to emit annotation citation (final): %s", exc)
                 emitted_citations.append(citation)
-                emitted_any = True
-            if emitted_any:
-                annotation_citations_emitted = True
 
         request_started_at = perf_counter()
 
@@ -1503,24 +1499,23 @@ class StreamingHandler:
                     if etype == "response.output_text.annotation.added":
                         ann = event.get("annotation") or {}
                         if ann.get("type") == "url_citation":
-                            # Basic fields
-                            url = (ann.get("url") or "").strip()
+                            payload = ann.get("url_citation") if isinstance(ann.get("url_citation"), dict) else ann
+                            url = (payload.get("url") or "").strip()
                             if url.endswith("?utm_source=openai"):
                                 url = url[: -len("?utm_source=openai")]
-                            title = (ann.get("title") or url).strip()
+                            title = (payload.get("title") or url).strip()
+                            ann_content = payload.get("content")
+                            ann_content = ann_content.strip() if isinstance(ann_content, str) else ""
 
-                            if url in ordinal_by_url:
+                            if not url or url in ordinal_by_url:
                                 continue
 
                             ordinal_by_url[url] = len(ordinal_by_url) + 1
 
-                            # Emit a citation event so Open WebUI can render
-                            # references in the footer instead of mutating the
-                            # streaming text (which was causing inline [n] markers).
                             host = _citation_host(url)
                             citation = {
                                 "source": {"name": host or "source", "url": url},
-                                "document": [title],
+                                "document": [ann_content[:citation_excerpt_max] if ann_content else title],
                                 "metadata": [{
                                     "source": url,
                                     "date_accessed": datetime.date.today().isoformat(),
@@ -1531,7 +1526,6 @@ class StreamingHandler:
                             except Exception as exc:
                                 self.logger.debug("Failed to emit annotation citation: %s", exc)
                             emitted_citations.append(citation)
-                            annotation_citations_emitted = True
 
                         continue
 
@@ -1604,10 +1598,7 @@ class StreamingHandler:
                                     if content_part.get("type") != "output_text":
                                         continue
                                     await _emit_annotation_citations(content_part.get("annotations"))
-                                    if annotation_citations_emitted:
-                                        break
-                            if not annotation_citations_emitted:
-                                await _emit_annotation_citations(item.get("annotations"))
+                            await _emit_annotation_citations(item.get("annotations"))
                             phase_marker = _phase_marker_for_output_item(item)
                             if phase_marker:
                                 await _append_assistant_hidden_markers([phase_marker])
@@ -1863,13 +1854,7 @@ class StreamingHandler:
                             await self._pipe._event_emitter_handler._emit_status(event_emitter, "", done=True)
                         elif item_type == "openrouter:web_search":
                             title = None
-                            result_data = item.get("result")
                             if valves.SHOW_TOOL_CARDS:
-                                # OpenRouter's web_search server tool does not include result data
-                                # in the tool item per OpenAPI schema (OutputWebSearchServerToolItem
-                                # has only id/status/type). Search results are delivered as
-                                # url_citation annotations on the assistant message, surfaced via
-                                # the Sources panel.
                                 result_text = "Search completed. Sources available in the citations panel below."
                                 effective_id = await _emit_tool_start(
                                     call_id=item.get("id", ""),
@@ -1878,21 +1863,15 @@ class StreamingHandler:
                                     status="completed",
                                 )
                                 await _emit_tool_result(call_id=effective_id, result_text=result_text)
+                            action = item.get("action") if isinstance(item.get("action"), dict) else {}
                             search_urls: list[str] = []
-                            url_sources: list[Any] = []
-                            if isinstance(result_data, dict):
-                                url_sources = result_data.get("urls") or result_data.get("results") or []
-                            elif isinstance(result_data, list):
-                                url_sources = result_data
-                            if not isinstance(url_sources, list):
-                                url_sources = []
-                            for u in url_sources:
-                                if isinstance(u, str):
-                                    search_urls.append(u)
-                                elif isinstance(u, dict):
-                                    href = u.get("url") or u.get("link") or u.get("href", "")
+                            for u in (action.get("sources") or []):
+                                if isinstance(u, dict):
+                                    href = u.get("url")
                                     if isinstance(href, str) and href:
                                         search_urls.append(href)
+                                elif isinstance(u, str) and u:
+                                    search_urls.append(u)
                             if search_urls and event_emitter:
                                 await event_emitter({"type": "status", "data": {
                                     "action": "web_search",
@@ -1905,13 +1884,16 @@ class StreamingHandler:
                             title = None
                             if valves.SHOW_TOOL_CARDS:
                                 fetch_url = item.get("url", "")
-                                result_data = item.get("result")
-                                try:
-                                    args_text = json.dumps({"url": fetch_url}, ensure_ascii=False) if fetch_url else "{}"
-                                    result_text = json.dumps(result_data, indent=2, ensure_ascii=False) if result_data is not None else "{}"
-                                except (TypeError, ValueError):
-                                    args_text = "{}"
-                                    result_text = str(result_data) if result_data is not None else "{}"
+                                fetch_error = item.get("error")
+                                fetch_content = item.get("content")
+                                if fetch_error:
+                                    result_text = str(fetch_error)
+                                elif isinstance(fetch_content, str) and fetch_content:
+                                    result_text = fetch_content
+                                else:
+                                    http_status = item.get("httpStatus")
+                                    result_text = f"Fetch failed (HTTP {http_status})" if http_status else "Fetch failed or returned no content."
+                                args_text = json.dumps({"url": fetch_url}, ensure_ascii=False) if fetch_url else "{}"
                                 effective_id = await _emit_tool_start(
                                     call_id=item.get("id", ""),
                                     name="web_fetch",

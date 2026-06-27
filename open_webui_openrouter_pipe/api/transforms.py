@@ -1689,12 +1689,13 @@ def apply_context_transforms(responses_body: "ResponsesBody", *, auto_context_tr
         responses_body.transforms = ["middle-out"]
 
 
-def _parse_url_citation_annotations(raw_annotations: list[Any]) -> Iterator[tuple[str, str]]:
-    """Parse url_citation annotations, yielding (url, title) pairs.
+def _parse_url_citation_annotations(raw_annotations: list[Any]) -> Iterator[tuple[str, str, str]]:
+    """Parse url_citation annotations, yielding (url, title, content) triples.
 
     Handles both nested format (``annotation.url_citation.url``) and flat
-    format (``annotation.url``).  Validates that url is a non-empty string
-    and normalises the title.
+    format (``annotation.url``).  Validates that url is a non-empty string,
+    normalises the title, and surfaces the ``content`` excerpt OpenRouter
+    supplies (empty string when absent).
     """
     for raw_ann in raw_annotations:
         if not isinstance(raw_ann, dict):
@@ -1705,9 +1706,11 @@ def _parse_url_citation_annotations(raw_annotations: list[Any]) -> Iterator[tupl
         if isinstance(payload, dict):
             url = payload.get("url")
             title = payload.get("title") or url
+            content = payload.get("content")
         else:
             url = raw_ann.get("url")
             title = raw_ann.get("title") or url
+            content = raw_ann.get("content")
         if not isinstance(url, str) or not url.strip():
             continue
         url = url.strip()
@@ -1715,4 +1718,5 @@ def _parse_url_citation_annotations(raw_annotations: list[Any]) -> Iterator[tupl
             title = title.strip() or url
         else:
             title = url
-        yield url, title
+        content = content.strip() if isinstance(content, str) else ""
+        yield url, title, content

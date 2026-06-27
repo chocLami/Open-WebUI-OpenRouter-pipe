@@ -205,13 +205,13 @@ class NonStreamingAdapter:
             annotations = message_obj.get("annotations")
             if isinstance(annotations, list) and annotations:
                 seen_urls: set[str] = set()
-                for url, title in _parse_url_citation_annotations(annotations):
+                for url, title, content in _parse_url_citation_annotations(annotations):
                     if url in seen_urls:
                         continue
                     seen_urls.add(url)
                     yield {
                         "type": "response.output_text.annotation.added",
-                        "annotation": {"type": "url_citation", "url": url, "title": title},
+                        "annotation": {"type": "url_citation", "url": url, "title": title, "content": content},
                     }
 
             tool_calls = message_obj.get("tool_calls")

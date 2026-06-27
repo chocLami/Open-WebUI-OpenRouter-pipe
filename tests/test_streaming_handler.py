@@ -11346,6 +11346,73 @@ class TestOpenRouterServerToolCards:
         assert outs[0]["output"][0]["text"] == "Release 2.4 highlights: new streaming API."
 
     @pytest.mark.asyncio
+    async def test_citation_content_excerpt_threaded_and_superset_not_dropped(self, pipe_instance_async):
+        """url_citation.content excerpt fills the citation body, and a citation that appears
+        only on the final message item (a superset of the streamed annotation.added) is not
+        dropped by the all-or-nothing fallback gate."""
+        pipe = pipe_instance_async
+        events = [
+            {"type": "response.output_text.annotation.added",
+             "annotation": {"type": "url_citation", "url": "https://a.com", "title": "A", "content": "excerpt A"}},
+            {"type": "response.output_item.done", "item": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "x", "annotations": [
+                    {"type": "url_citation", "url_citation": {"url": "https://a.com", "title": "A", "content": "excerpt A"}},
+                    {"type": "url_citation", "url_citation": {"url": "https://b.com", "title": "B", "content": "excerpt B"}},
+                ]}]}},
+            {"type": "response.completed", "response": {"output": [], "usage": {}}},
+        ]
+        emitted = await self._run_card_events(pipe, events)
+        sources = [e for e in emitted if e.get("type") == "source"]
+        by_url = {s["data"]["source"]["url"]: s for s in sources}
+        assert "https://a.com" in by_url
+        assert "https://b.com" in by_url, "superset citation (b.com) was dropped"
+        assert "excerpt A" in by_url["https://a.com"]["data"]["document"]
+        assert "excerpt B" in by_url["https://b.com"]["data"]["document"]
+
+    @pytest.mark.asyncio
+    async def test_citation_excerpt_is_capped_for_display(self, pipe_instance_async):
+        """The url_citation excerpt is capped before entering the citation body (which is
+        persisted to the chat DB); a multi-KB Exa highlight must not bloat the record."""
+        pipe = pipe_instance_async
+        big = "X" * 5000
+        events = [
+            {"type": "response.output_item.done", "item": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "y", "annotations": [
+                    {"type": "url_citation", "url_citation": {"url": "https://a.com", "title": "A", "content": big}},
+                ]}]}},
+            {"type": "response.completed", "response": {"output": [], "usage": {}}},
+        ]
+        emitted = await self._run_card_events(pipe, events)
+        sources = [e for e in emitted if e.get("type") == "source"]
+        assert len(sources) == 1
+        body = sources[0]["data"]["document"][0]
+        assert len(body) <= 1200, f"excerpt not capped: {len(body)} chars"
+        assert body.startswith("X")
+
+    @pytest.mark.asyncio
+    async def test_web_fetch_failure_without_error_shows_status(self, pipe_instance_async):
+        """A failed web_fetch with no `error`/`content` must not render the literal '{}'."""
+        pipe = pipe_instance_async
+        pipe.valves.SHOW_TOOL_CARDS = True
+        events = [
+            {"type": "response.output_item.done", "item": {
+                "type": "openrouter:web_fetch", "id": "wf-err", "status": "incomplete",
+                "url": "https://example.com/404", "httpStatus": 404}},
+            {"type": "response.completed", "response": {"output": [], "usage": {}}},
+        ]
+        emitted = await self._run_card_events(pipe, events)
+        outs = [e["item"] for e in emitted
+                if e.get("type") == "response.output_item.added"
+                and e.get("item", {}).get("type") == "function_call_output"
+                and e.get("item", {}).get("call_id") == "wf-err"]
+        assert len(outs) == 1
+        text = outs[0]["output"][0]["text"]
+        assert text != "{}"
+        assert "404" in text
+
+    @pytest.mark.asyncio
     async def test_openrouter_unknown_tool_harvests_keys_when_no_result(self, pipe_instance_async):
         """Generic fallback with no `result` harvests the item's payload keys into the card."""
         pipe = pipe_instance_async
@@ -11455,8 +11522,8 @@ class TestOpenRouterServerToolCards:
             {"type": "response.output_item.added", "item": {"type": "openrouter:web_fetch", "id": "wf-1", "status": "in_progress"}},
             {"type": "response.output_item.done", "item": {
                 "type": "openrouter:web_fetch", "id": "wf-1", "status": "completed",
-                "url": "https://example.com/page",
-                "result": {"content": "page text"}}},
+                "url": "https://example.com/page", "title": "Example",
+                "content": "page text content"}},
             {"type": "response.completed", "response": {"output": [], "usage": {}}},
         ]
         monkeypatch.setattr(Pipe, "send_openrouter_streaming_request", _make_fake_stream(events))
@@ -11476,6 +11543,13 @@ class TestOpenRouterServerToolCards:
                           and e.get("item", {}).get("call_id") == "wf-1"]
         assert len(function_calls) == 1
         assert "https://example.com/page" in function_calls[0]["item"]["arguments"]
+        # The fetched `content` (per OutputWebFetchServerToolItem schema) must render in the card.
+        function_outputs = [e for e in emitted
+                            if e.get("type") == "response.output_item.added"
+                            and e.get("item", {}).get("type") == "function_call_output"
+                            and e.get("item", {}).get("call_id") == "wf-1"]
+        assert len(function_outputs) == 1
+        assert "page text content" in function_outputs[0]["item"]["output"][0]["text"]
 
     @pytest.mark.asyncio
     async def test_openrouter_web_search_url_extraction(self, monkeypatch, pipe_instance_async):
@@ -11487,9 +11561,9 @@ class TestOpenRouterServerToolCards:
         events = [
             {"type": "response.output_item.done", "item": {
                 "type": "openrouter:web_search", "id": "ws-1", "status": "completed",
-                "result": {"results": [
-                    {"url": "https://a.com", "title": "A"},
-                    {"url": "https://b.com", "title": "B"},
+                "action": {"query": "x", "sources": [
+                    {"type": "url", "url": "https://a.com"},
+                    {"type": "url", "url": "https://b.com"},
                 ]}}},
             {"type": "response.completed", "response": {"output": [], "usage": {}}},
         ]

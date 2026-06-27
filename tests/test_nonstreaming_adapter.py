@@ -1084,6 +1084,54 @@ async def test_nonstreaming_chat_annotations_non_string_title(pipe_instance_asyn
     assert first["annotation"]["title"] == "https://notitle.com"
 
 
+@pytest.mark.asyncio
+async def test_nonstreaming_chat_annotation_preserves_content(pipe_instance_async):
+    """The re-emitted url_citation annotation must preserve the `content` excerpt so the
+    citation body (not just the title) survives the non-streaming chat path."""
+    pipe = pipe_instance_async
+    valves = pipe.valves
+    session = pipe._create_http_session(valves)
+
+    response_json = {
+        "id": "chatcmpl-ct",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "Based on sources",
+                "annotations": [
+                    {"type": "url_citation", "url_citation": {
+                        "url": "https://x.com", "title": "X", "content": "the excerpt body"}},
+                ],
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+    }
+
+    with aioresponses() as mock_http:
+        mock_http.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            payload=response_json,
+        )
+
+        events = []
+        async for event in pipe.send_openrouter_nonstreaming_request_as_events(
+            session,
+            {"model": "openai/gpt-4o", "input": [{"role": "user", "content": "Search"}]},
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            valves=valves,
+            endpoint_override="chat_completions",
+        ):
+            events.append(event)
+
+        await session.close()
+
+    ann_events = [e for e in events if e.get("type") == "response.output_text.annotation.added"]
+    assert len(ann_events) == 1
+    assert ann_events[0]["annotation"].get("content") == "the excerpt body"
+
+
 # ============================================================================
 # _run_chat Tool Calls Tests (lines 195, 198, 201, 204, 207-208)
 # ============================================================================
