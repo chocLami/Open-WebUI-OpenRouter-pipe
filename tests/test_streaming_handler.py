@@ -5100,10 +5100,9 @@ async def test_completion_events_preserve_streamed_text(monkeypatch, pipe_instan
 
 @pytest.mark.asyncio
 async def test_streaming_loop_handles_openrouter_errors(monkeypatch, pipe_instance_async):
-    """Test that OpenRouter errors are reported via real _report_openrouter_error method.
-
-    FIX: Removed inappropriate spy mock on _report_openrouter_error.
-    Now exercises the real error reporting method which emits status events.
+    """A PRE-emission OpenRouterAPIError re-raises out of _run_streaming_loop so the
+    orchestrator's retry loop can apply its matchers (signature/cache/effort). The
+    finally must take the error path -- no spurious done=True completion.
     """
     pipe = pipe_instance_async
     body = ResponsesBody(model="openrouter/test", input=[], stream=True)
@@ -5125,23 +5124,24 @@ async def test_streaming_loop_handles_openrouter_errors(monkeypatch, pipe_instan
     async def emitter(event):
         emitted.append(event)
 
-    result = await pipe._streaming_handler._run_streaming_loop(
-        body,
-        valves,
-        emitter,
-        metadata={"model": {"id": "sandbox"}},
-        tools={},
-        session=cast(Any, object()),
-        user_id="user-123",
-    )
+    with pytest.raises(OpenRouterAPIError):
+        await pipe._streaming_handler._run_streaming_loop(
+            body,
+            valves,
+            emitter,
+            metadata={"model": {"id": "sandbox"}},
+            tools={},
+            session=cast(Any, object()),
+            user_id="user-123",
+        )
 
-    assert result == ""
-
-    # Verify that error reporting happened by checking status events
-    status_events = [event for event in emitted if event.get("type") == "status"]
-    assert status_events, "Expected provider error status event"
-    assert status_events[-1]["data"]["done"] is True
-    assert "provider error" in status_events[-1]["data"]["description"].lower()
+    # C1 guard: the re-raise must take the error path in `finally`, never the
+    # success path -- so no terminal done=True completion may be emitted.
+    done_completions = [
+        event for event in emitted
+        if event.get("type") == "status" and event.get("data", {}).get("done") is True
+    ]
+    assert not done_completions, f"re-raise must not emit a completion: {done_completions}"
 
 
 @pytest.mark.asyncio

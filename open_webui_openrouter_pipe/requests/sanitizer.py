@@ -11,6 +11,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..api.transforms import _filter_replayable_input_items
 from ..core.context_budget import apply_replay_tool_output_budget
+from ..integrations.anthropic import _is_anthropic_model_id
 
 _ORPHAN_STUB_OUTPUT = (
     "[Tool output unavailable -- not recorded in conversation history.]"
@@ -21,11 +22,86 @@ if TYPE_CHECKING:
     from ..api.transforms import ResponsesBody
 
 
+def _reasoning_item_unsigned(item: dict[str, Any]) -> bool:
+    """True for a /responses reasoning item that is plaintext thinking with no
+    signature and no encrypted payload -- unreplayable to Anthropic."""
+    if item.get("signature") or item.get("encrypted_content"):
+        return False
+    content = item.get("content")
+    if not isinstance(content, list):
+        return False
+    has_text = False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("signature") or part.get("encrypted_content"):
+            return False
+        if part.get("type") == "reasoning_text" and isinstance(part.get("text"), str) and part["text"].strip():
+            has_text = True
+    return has_text
+
+
+def _detail_unsigned_text(detail: Any) -> bool:
+    """True for a reasoning.text detail that has text but no signature."""
+    if not isinstance(detail, dict) or detail.get("type") != "reasoning.text":
+        return False
+    if detail.get("signature"):
+        return False
+    text = detail.get("text")
+    return isinstance(text, str) and bool(text.strip())
+
+
+def _strip_unreplayable_anthropic_reasoning(items: list[Any]) -> list[Any]:
+    """Drop thinking that is unreplayable to Anthropic (plaintext with no signature
+    and no encrypted payload); caller must gate on an Anthropic target. The provider
+    requires a turn's whole reasoning sequence to be replayed intact and rejects a
+    partially modified one, so removal is all-or-nothing per turn: /responses reasoning
+    items are grouped into turn spans -- delimited only by USER messages (the real turn
+    boundary, matching the reinterleave/tool-pairing logic), since within one assistant
+    turn the reasoning is split across tool items AND assistant text-chunk messages --
+    and every reasoning item in a span is dropped when ANY item in that span is
+    unreplayable. A message's reasoning_details is likewise dropped whole when ANY entry
+    is an unsigned reasoning.text."""
+    drop_idx: set[int] = set()
+    span: list[int] = []
+    tainted = False
+    for idx, item in enumerate(items):
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            span.append(idx)
+            if _reasoning_item_unsigned(item):
+                tainted = True
+        elif isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "user":
+            if tainted:
+                drop_idx.update(span)
+            span = []
+            tainted = False
+    if tainted:
+        drop_idx.update(span)
+
+    out: list[Any] = []
+    changed = bool(drop_idx)
+    for idx, item in enumerate(items):
+        if idx in drop_idx:
+            continue
+        if isinstance(item, dict) and isinstance(item.get("reasoning_details"), list):
+            if any(_detail_unsigned_text(d) for d in item["reasoning_details"]):
+                changed = True
+                item = {k: v for k, v in item.items() if k != "reasoning_details"}
+        out.append(item)
+    return out if changed else items
+
+
 def _sanitize_request_input(pipe: "Pipe", body: "ResponsesBody") -> None:
     """Remove non-replayable artifacts that may have snuck into body.input."""
     items = getattr(body, "input", None)
     if not isinstance(items, list):
         return
+    original_items = items
+    target_model = getattr(body, "api_model", None)
+    if not (isinstance(target_model, str) and target_model.strip()):
+        target_model = str(getattr(body, "model", "") or "")
+    if _is_anthropic_model_id(target_model):
+        items = _strip_unreplayable_anthropic_reasoning(items)
     sanitized = _filter_replayable_input_items(items, logger=pipe.logger)
     removed = len(items) - len(sanitized)
 
@@ -96,7 +172,7 @@ def _sanitize_request_input(pipe: "Pipe", body: "ResponsesBody") -> None:
     validated = _validate_tool_call_pairs(normalized, logger=pipe.logger)
     pairs_changed = validated is not normalized
 
-    if removed or stripped_any or omitted_call_ids or pairs_changed or (sanitized is not items):
+    if removed or stripped_any or omitted_call_ids or pairs_changed or (items is not original_items) or (sanitized is not items):
         if removed:
             pipe.logger.debug(
                 "Sanitized provider input: removed %d non-replayable artifact(s).",

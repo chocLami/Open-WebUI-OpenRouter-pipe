@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 from .registry import ModelFamily
 from ..core.errors import OpenRouterAPIError
+from ..integrations.anthropic import _is_anthropic_model_id
 
 # Valve effort value that triggers verbosity: "max" for Claude models.
 _XHIGH_EFFORT = "xhigh"
@@ -233,3 +234,62 @@ class ReasoningConfigManager:
                 return True
 
         return False
+
+    def _should_retry_dropping_signed_reasoning(
+        self,
+        error: OpenRouterAPIError,
+        responses_body: ResponsesBody,
+    ) -> bool:
+        """Strip replayed thinking blocks and retry when an Anthropic provider rejects a stale thinking-block signature on a 400."""
+        if getattr(error, "status", None) != 400:
+            return False
+        target_model = getattr(responses_body, "api_model", None)
+        if not (isinstance(target_model, str) and target_model.strip()):
+            target_model = str(getattr(responses_body, "model", "") or "")
+        if not _is_anthropic_model_id(target_model):
+            return False
+        message_candidates = [
+            error.upstream_message,
+            error.openrouter_message,
+            str(error),
+        ]
+        is_signature_error = False
+        for message in message_candidates:
+            if not isinstance(message, str):
+                continue
+            lowered = message.lower()
+            if ("signature" in lowered and "thinking" in lowered) or (
+                "thinking block" in lowered and "cannot be modified" in lowered
+            ):
+                is_signature_error = True
+                break
+        if not is_signature_error:
+            return False
+        if not self._strip_replayed_reasoning(responses_body):
+            return False
+        self.logger.info(
+            "Retrying without replayed thinking blocks for model '%s' after a thinking-block signature was rejected.",
+            responses_body.model,
+        )
+        return True
+
+    @staticmethod
+    def _strip_replayed_reasoning(responses_body: ResponsesBody) -> bool:
+        """Remove replayed reasoning items and message-level reasoning_details from the request input; return True if anything changed."""
+        input_items = getattr(responses_body, "input", None)
+        if not isinstance(input_items, list):
+            return False
+        changed = False
+        cleaned = []
+        for item in input_items:
+            if isinstance(item, dict):
+                if item.get("type") == "reasoning":
+                    changed = True
+                    continue
+                if "reasoning_details" in item:
+                    item = {k: v for k, v in item.items() if k != "reasoning_details"}
+                    changed = True
+            cleaned.append(item)
+        if changed:
+            responses_body.input = cleaned
+        return changed

@@ -1114,6 +1114,7 @@ class StreamingHandler:
         error_occurred = False
         was_cancelled = False
         loop_limit_reached = False
+        retry_barrier_crossed = False
         try:
             for loop_index in range(valves.MAX_FUNCTION_CALL_LOOPS + 1):
                 # The +1 iteration is reserved exclusively for the synthesis
@@ -1122,6 +1123,8 @@ class StreamingHandler:
                 if loop_index >= valves.MAX_FUNCTION_CALL_LOOPS and not loop_limit_reached:
                     break
 
+                if loop_index > 0:
+                    retry_barrier_crossed = True
                 final_response: dict[str, Any] | None = None
                 _sanitize_request_input(self._pipe, body)
                 api_model_override = getattr(body, "api_model", None)
@@ -1326,6 +1329,7 @@ class StreamingHandler:
                             if etype == "response.output_text.done" and not assistant_message:
                                 assistant_message = event.get("text") or ""
                             await _emit_fusion_event(event)
+                            retry_barrier_crossed = True
 
                     # --- Emit partial delta assistant message
                     if etype == "response.output_text.delta":
@@ -1359,6 +1363,7 @@ class StreamingHandler:
                                         },
                                     }
                                 )
+                                retry_barrier_crossed = True
                         continue
 
                     if etype == "response.content_part.done":
@@ -2051,6 +2056,7 @@ class StreamingHandler:
                             if event_emitter:
                                 image_delta = assistant_message[msg_before:]
                                 await event_emitter({"type": "chat:message:delta", "data": {"content": image_delta}})
+                                retry_barrier_crossed = True
 
                         continue
 
@@ -2177,7 +2183,7 @@ class StreamingHandler:
                 invalid_call_outputs: list[dict[str, Any]] = []
                 for item in final_response.get("output", []):
                     item_type = item.get("type")
-                    if item_type == "reasoning" and item.get("encrypted_content"):
+                    if item_type == "reasoning" and (item.get("encrypted_content") or item.get("signature")):
                         continuation_input_items.append(item)
                         reasoning_count += 1
                     elif item_type == "message":
@@ -2236,6 +2242,7 @@ class StreamingHandler:
                 _calls_seen = reasoning_anchor_state["calls_seen"]
                 _derived: list[tuple[str, int]] = []
                 _derived_by_id: dict[str, tuple[str, int]] = {}
+                _signed_by_id: dict[str, dict[str, str]] = {}
                 for _i, _o in enumerate(_ordered):
                     if not (isinstance(_o, dict) and _o.get("type") == "reasoning"):
                         continue
@@ -2254,6 +2261,18 @@ class StreamingHandler:
                     _rid = _o.get("id")
                     if _rid:
                         _derived_by_id[_rid] = _entry
+                        _carried: dict[str, str] = {}
+                        _sig = _o.get("signature")
+                        if isinstance(_sig, str) and _sig:
+                            _carried["signature"] = _sig
+                        _enc = _o.get("encrypted_content")
+                        if isinstance(_enc, str) and _enc:
+                            _carried["encrypted_content"] = _enc
+                        _fmt = _o.get("format")
+                        if isinstance(_fmt, str) and _fmt:
+                            _carried["format"] = _fmt
+                        if _carried:
+                            _signed_by_id[_rid] = _carried
                 # The stream call count is only trustworthy when it matches the
                 # authoritative count from the completed output; when it does, an
                 # un-echoed reasoning is sided by how many calls preceded it.
@@ -2261,6 +2280,8 @@ class StreamingHandler:
                 _stream_consistent = _stream_total == _calls_seen + len(_fc_local)
                 for _idx, (_pending_reasoning, _stream_pos) in enumerate(reasoning_anchor_state["awaiting"]):
                     _pending_id = _pending_reasoning.get("id")
+                    if _pending_id and _pending_id in _signed_by_id:
+                        _pending_reasoning.update(_signed_by_id[_pending_id])
                     if _pending_id and _pending_id in _derived_by_id:
                         _mode, _ordinal = _derived_by_id[_pending_id]
                     elif _stream_consistent and isinstance(_stream_pos, int):
@@ -2807,8 +2828,10 @@ class StreamingHandler:
         except OpenRouterAPIError as exc:
             error_occurred = True
             session_log_reason = str(exc)
-            assistant_message = ""
             cancel_thinking()
+            if not retry_barrier_crossed:
+                raise
+            assistant_message = ""
             await self._pipe._ensure_error_formatter()._report_openrouter_error(
                 exc,
                 event_emitter=event_emitter,

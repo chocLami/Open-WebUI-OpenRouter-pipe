@@ -198,10 +198,15 @@ class ChatCompletionsAdapter:
             dtype = detail.get("type")
             if not isinstance(dtype, str) or not dtype:
                 return
+            idx = detail.get("index")
             did = detail.get("id")
-            if not isinstance(did, str) or not did.strip():
-                did = f"{dtype}:{len(reasoning_details_order)}"
-            key = (dtype, did)
+            if isinstance(idx, int) and not isinstance(idx, bool):
+                disc = f"idx:{idx}"
+            elif isinstance(did, str) and did.strip():
+                disc = did.strip()
+            else:
+                disc = f"pos:{len(reasoning_details_order)}"
+            key = (dtype, disc)
             existing = reasoning_details_by_key.get(key)
             if existing is None:
                 reasoning_details_order.append(key)
@@ -215,6 +220,12 @@ class ChatCompletionsAdapter:
                     merged["text"] = f"{prev_text}{next_text}"
                 elif isinstance(next_text, str):
                     merged["text"] = next_text
+                next_signature = detail.get("signature")
+                if isinstance(next_signature, str) and next_signature:
+                    merged["signature"] = next_signature
+                next_format = detail.get("format")
+                if isinstance(next_format, str) and next_format:
+                    merged["format"] = next_format
             elif dtype == "reasoning.summary":
                 next_summary = detail.get("summary")
                 if isinstance(next_summary, str) and next_summary.strip():
@@ -238,7 +249,12 @@ class ChatCompletionsAdapter:
             for key in reasoning_details_order:
                 detail = reasoning_details_by_key.get(key)
                 if isinstance(detail, dict) and detail:
-                    out.append(dict(detail))
+                    clean = dict(detail)
+                    if not clean.get("signature"):
+                        clean.pop("signature", None)
+                    if not clean.get("format"):
+                        clean.pop("format", None)
+                    out.append(clean)
             return out
 
         first_chunk_received = False

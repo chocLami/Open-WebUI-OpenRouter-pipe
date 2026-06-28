@@ -884,6 +884,7 @@ class RequestOrchestrator:
         reasoning_retry_attempted = False
         reasoning_effort_retry_attempted = False
         anthropic_prompt_cache_retry_attempted = False
+        signature_retry_attempted = False
         self.logger.debug(
             "Orchestrator: __request__ type=%s, is_none=%s",
             type(__request__).__name__,
@@ -992,6 +993,13 @@ class RequestOrchestrator:
                                 self._pipe._ensure_reasoning_config_manager()._apply_gemini_thinking_config(responses_body, valves)
                                 self._pipe._ensure_reasoning_config_manager()._apply_anthropic_verbosity(responses_body, valves)
                                 continue
+
+                if (
+                    not signature_retry_attempted
+                    and self._pipe._ensure_reasoning_config_manager()._should_retry_dropping_signed_reasoning(exc, responses_body)
+                ):
+                    signature_retry_attempted = True
+                    continue
 
                 if (
                     not reasoning_retry_attempted

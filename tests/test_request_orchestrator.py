@@ -2819,8 +2819,9 @@ async def test_reasoning_effort_retry_on_unsupported_value():
 
             await _consume_stream(result)
 
-        # Should have made at least 1 call
-        assert call_count[0] >= 1
+        # The pre-emission 400 re-raises into the orchestrator, so the effort retry
+        # fires on the streaming path: exactly two HTTP calls.
+        assert call_count[0] == 2
 
     finally:
         ModelFamily.set_dynamic_specs({})
@@ -4193,8 +4194,9 @@ async def test_anthropic_prompt_cache_retry():
 
                     await _consume_stream(result)
 
-        # Should have retried
-        assert call_count[0] >= 1
+        # The pre-emission 400 re-raises into the orchestrator, so the retry fires
+        # on the streaming path: exactly two HTTP calls.
+        assert call_count[0] == 2
 
     finally:
         await pipe.close()
@@ -4207,15 +4209,18 @@ async def test_anthropic_prompt_cache_retry():
 
 @pytest.mark.asyncio
 async def test_reasoning_retry_without_reasoning():
-    """Test retry without reasoning when _should_retry_without_reasoning returns True.
-
-    Covers lines 757-762: reasoning retry logic.
-    """
+    """The REAL _should_retry_without_reasoning gate fires on a streaming pre-emission
+    400: reasoning is enabled on the body and the provider returns the include_thoughts
+    trigger, so the orchestrator drops reasoning and retries -- exactly two HTTP calls.
+    No mock: the production gate must fire on its own. The /models catalog below
+    declares reasoning support, so _apply_reasoning_preferences sets reasoning on the
+    body -- the precondition the real gate checks."""
     pipe = Pipe()
 
     try:
         pipe.valves.API_KEY = EncryptedStr("test-api-key")
         pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+        pipe.valves.REASONING_EFFORT = "high"
 
         call_count = [0]
         captured_payloads: list[dict] = []
@@ -4226,11 +4231,15 @@ async def test_reasoning_retry_without_reasoning():
             call_count[0] += 1
 
             if call_count[0] == 1:
-                # First call fails with reasoning error
+                # Use a reasoning error that does NOT trip the adapter's
+                # /responses->/chat/completions auto-fallback (no "response"/
+                # "unsupported" tokens, code not in the unsupported set), so the
+                # OpenRouterAPIError re-raises through the streaming loop and
+                # reaches the orchestrator's _should_retry_without_reasoning gate.
                 error_body = {
                     "error": {
-                        "message": "Reasoning is not supported for this model",
-                        "code": "unsupported_feature",
+                        "message": "include_thoughts is only enabled when thinking is enabled",
+                        "code": "invalid_request_error",
                     }
                 }
                 return CallbackResult(
@@ -4257,20 +4266,6 @@ async def test_reasoning_retry_without_reasoning():
         async def event_emitter(event):
             pass
 
-        # Mock _should_retry_without_reasoning to return True on first call
-        retry_calls = [0]
-
-        def mock_should_retry(exc, body):
-            retry_calls[0] += 1
-            if retry_calls[0] == 1:
-                # First call - remove reasoning and return True
-                if hasattr(body, "reasoning"):
-                    body.reasoning = None
-                return True
-            return False
-
-        pipe._ensure_reasoning_config_manager()._should_retry_without_reasoning = mock_should_retry
-
         with aioresponses() as mock_http:
             mock_http.post(
                 "https://openrouter.ai/api/v1/responses",
@@ -4279,7 +4274,8 @@ async def test_reasoning_retry_without_reasoning():
             )
             mock_http.get(
                 "https://openrouter.ai/api/v1/models",
-                payload={"data": [{"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"}]},
+                payload={"data": [{"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini",
+                                   "supported_parameters": ["reasoning"]}]},
                 repeat=True,
             )
 
@@ -4303,8 +4299,100 @@ async def test_reasoning_retry_without_reasoning():
 
             await _consume_stream(result)
 
-        # Should have retried
-        assert call_count[0] >= 1
+        # The pre-emission 400 re-raises out of the streaming loop into the
+        # orchestrator, where the REAL _should_retry_without_reasoning gate fires
+        # (reasoning is set + the include_thoughts trigger), drops reasoning, and
+        # retries: exactly two HTTP calls.
+        assert call_count[0] == 2
+
+    finally:
+        await pipe.close()
+
+
+@pytest.mark.asyncio
+async def test_signature_retry_strips_replayed_reasoning_end_to_end():
+    """End-to-end S1 backstop: a streaming Anthropic turn replays a SIGNED thinking block
+    that the provider rejects with a 400 'Invalid signature in thinking block'. The error
+    re-raises into the orchestrator, where _should_retry_dropping_signed_reasoning (gated
+    on Anthropic + 400) strips the replayed reasoning and retries -- two HTTP calls, and
+    the retry carries no reasoning."""
+    pipe = Pipe()
+
+    try:
+        pipe.valves.API_KEY = EncryptedStr("test-api-key")
+        pipe.valves.BASE_URL = "https://openrouter.ai/api/v1"
+        # Isolate the signature backstop: with caching on, the prompt-cache retry (which
+        # sits before S1) would consume the 400 first.
+        pipe.valves.ENABLE_ANTHROPIC_PROMPT_CACHING = False
+
+        call_count = [0]
+        captured_payloads: list[dict] = []
+
+        def callback(url, **kwargs):
+            payload = kwargs.get("json", {})
+            captured_payloads.append(payload)
+            call_count[0] += 1
+            if call_count[0] == 1:
+                error_body = {"error": {
+                    "message": "messages.1: Invalid `signature` in `thinking` block",
+                    "code": "invalid_request_error",
+                }}
+                return CallbackResult(
+                    body=json.dumps(error_body).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}, status=400,
+                )
+            return CallbackResult(
+                body=_make_responses_sse("Success").encode("utf-8"),
+                headers={"Content-Type": "text/event-stream"}, status=200,
+            )
+
+        async def event_emitter(event):
+            pass
+
+        with aioresponses() as mock_http:
+            for ep in ("responses", "chat/completions"):
+                mock_http.post(f"https://openrouter.ai/api/v1/{ep}", callback=callback, repeat=True)
+            mock_http.get(
+                "https://openrouter.ai/api/v1/models",
+                payload={"data": [{"id": "anthropic/claude-sonnet-4.6", "name": "Claude",
+                                   "supported_parameters": ["reasoning"]}]},
+                repeat=True,
+            )
+
+            body = {
+                "model": "anthropic/claude-sonnet-4.6",
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {"role": "assistant", "content": "prior answer",
+                     "reasoning_details": [{"type": "reasoning.text", "text": "prior thinking",
+                                            "signature": "STALE_SIG", "format": "anthropic-claude-v1"}]},
+                    {"role": "user", "content": "second"},
+                ],
+                "stream": True,
+            }
+
+            result = await pipe.pipe(
+                body=body,
+                __user__={"id": "user_123"},
+                __request__=None,
+                __event_emitter__=event_emitter,
+                __event_call__=None,
+                __metadata__={"model": {"id": "anthropic/claude-sonnet-4.6"}},
+                __tools__=None,
+                __task__=None,
+                __task_body__=None,
+            )
+
+            await _consume_stream(result)
+
+        assert call_count[0] == 2, f"the S1 signature retry must fire on streaming: {call_count[0]} call(s)"
+
+        def _replays_signed_reasoning(payload: dict) -> bool:
+            blob = json.dumps(payload.get("input") or payload.get("messages") or [])
+            return "STALE_SIG" in blob or "prior thinking" in blob
+
+        assert _replays_signed_reasoning(captured_payloads[0]), "call 1 must replay the signed reasoning"
+        assert not _replays_signed_reasoning(captured_payloads[1]), "the S1 retry must strip the reasoning"
 
     finally:
         await pipe.close()
