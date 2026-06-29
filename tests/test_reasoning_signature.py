@@ -21,6 +21,7 @@ from aioresponses import aioresponses
 
 from open_webui_openrouter_pipe import Pipe, ResponsesBody
 from open_webui_openrouter_pipe.core.errors import OpenRouterAPIError
+from open_webui_openrouter_pipe.api.transforms import _responses_payload_to_chat_completions_payload
 from open_webui_openrouter_pipe.requests.sanitizer import (
     _sanitize_request_input,
     _strip_unreplayable_anthropic_reasoning,
@@ -168,6 +169,51 @@ async def test_chat_stable_id_deltas_still_merge(pipe_instance_async):
     assert len(details) == 1, f"same-id deltas must still merge: {details}"
     assert details[0]["text"] == "first second"
     assert details[0]["signature"] == "SIG_R1"
+
+
+@pytest.mark.asyncio
+async def test_fragmented_reasoning_round_trips_as_one_signed_block_on_chat(pipe_instance_async):
+    """Round-trip: fragmented reasoning.text deltas consolidate into ONE signed block on
+    emission, and replaying that block as a prior assistant turn serializes to the
+    /chat/completions wire as ONE signed reasoning.text detail -- not re-fragmented, signature
+    intact. Guards the Channel-B chat replay that Anthropic verifies across both halves."""
+    pipe = pipe_instance_async
+    sse = (
+        _sse({"choices": [{"delta": {"reasoning_details": [
+            {"type": "reasoning.text", "index": 0, "text": "Let me "}]}, "finish_reason": None}]})
+        + _sse({"choices": [{"delta": {"reasoning_details": [
+            {"type": "reasoning.text", "index": 0, "text": "think "}]}, "finish_reason": None}]})
+        + _sse({"choices": [{"delta": {"reasoning_details": [
+            {"type": "reasoning.text", "index": 0, "text": "carefully.",
+             "signature": "SIG_FINAL", "format": "anthropic-claude-v1"}]}, "finish_reason": None}]})
+        + _sse({"choices": [{"delta": {"content": "Answer"}, "finish_reason": None}]})
+        + _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        + "data: [DONE]\n\n"
+    )
+    events = await _drive_chat_stream(pipe, sse)
+    consolidated = [d for d in _message_reasoning_details(events) if d.get("type") == "reasoning.text"]
+    assert len(consolidated) == 1, f"turn 1 must consolidate fragments into one block: {consolidated}"
+    assert consolidated[0]["text"] == "Let me think carefully."
+    assert consolidated[0]["signature"] == "SIG_FINAL"
+
+    payload = {
+        "model": "anthropic/claude-sonnet-4.6",
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "message", "role": "assistant",
+             "content": [{"type": "output_text", "text": "Answer"}],
+             "reasoning_details": [dict(consolidated[0])]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "again"}]},
+        ],
+    }
+    chat = _responses_payload_to_chat_completions_payload(payload)
+    assistant_msgs = [m for m in chat["messages"] if m.get("role") == "assistant"]
+    assert len(assistant_msgs) == 1, f"expected one replayed assistant message: {chat['messages']}"
+    replayed = assistant_msgs[0].get("reasoning_details")
+    assert isinstance(replayed, list) and len(replayed) == 1, \
+        f"replayed reasoning must stay ONE block, not re-fragment: {replayed}"
+    assert replayed[0]["text"] == "Let me think carefully.", "full reasoning text must survive replay"
+    assert replayed[0]["signature"] == "SIG_FINAL", "signature must survive replay to the chat wire"
 
 
 # --------------------------------------------------------------------------- #
